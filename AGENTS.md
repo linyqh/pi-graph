@@ -5,18 +5,21 @@
 - `extensions/graph-engine/` contains the pi extension, graph runtime, process bridge, shared types, and reusable node factories.
 - `graphs/` contains graph definitions and the registry. Add new graphs as focused modules and register them in `graphs/index.ts`.
 - `README.md` documents local installation and the available `/graph*` commands. `tsconfig.json` is the source of truth for TypeScript checks.
-- There is no checked-in test or asset directory yet; keep future tests near the behavior they cover or in a clearly named `tests/` directory.
+- `tests/` contains the Node.js test suite for graph compilation, runtime behavior, storage, resources, and Pi integration boundaries. There is no checked-in asset directory yet.
 
 ## Build, Test, and Development Commands
 
-This package has no npm scripts or build step. Use the following checks from the repository root:
+This package has no build step. Use the checked-in npm scripts and Pi smoke commands from the repository root:
 
 ```bash
-npx tsc --noEmit       # Type-check extensions and graph modules
-pi install "$PWD"     # Install/update the local pi package
-/reload                # Run inside pi after editing
-/graph-list            # Smoke-test graph registration
-/graph research "..."  # Exercise the built-in research graph
+npm ci                  # Install the pinned development dependencies
+npm run typecheck       # Type-check extensions and graph modules
+npm test                # Run the Node.js test suite
+npm run check           # Run type-checking and tests together
+pi install "$PWD"      # Install/update the local pi package
+/reload                 # Run inside pi after editing
+/graph-list             # Smoke-test graph registration
+/graph research "..."   # Exercise the built-in research graph
 ```
 
 Peer dependencies are supplied by the pi environment. If `tsc` cannot resolve them, run the check from an environment with the pi package dependencies installed.
@@ -27,7 +30,7 @@ Use strict TypeScript with ES2022/NodeNext modules and explicit `.ts` import ext
 
 ## Testing Guidelines
 
-No automated test framework or coverage threshold is configured. Every change should at minimum pass `npx tsc --noEmit` and a focused pi smoke test. For runtime or node changes, exercise success, failure, and approval paths where practical; record any manual-only verification in the pull request.
+The automated suite uses Node.js `node:test`; no coverage threshold is configured. Every change should at minimum pass `npm run check` and a focused Pi smoke test. For runtime or node changes, exercise success, failure, and approval paths where practical; record any manual-only verification in the pull request.
 
 ## Commit & Pull Request Guidelines
 

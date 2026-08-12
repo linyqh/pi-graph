@@ -1,6 +1,6 @@
-# pi-graph-engineering
+# pi-graph
 
-`pi-graph-engineering` 是一个面向 Pi 的可校验、可恢复智能体图工作流运行时。项目级定义和最新运行快照统一存入独立的 `.agent-graph/` 存储模块；访谈式图创建器会把用户目标拆成经过确认的声明式工作流，并安全保存为 `.agent-graph/graphs/<name>.json`。
+`pi-graph` 是一个面向 Pi 的可校验、可恢复智能体图工作流运行时。项目级定义和最新运行快照统一存入独立的 `.agent-graph/` 存储模块；访谈式图创建器会把用户目标拆成经过确认的声明式工作流，并安全保存为 `.agent-graph/graphs/<name>.json`。
 
 包内置一个图：
 
