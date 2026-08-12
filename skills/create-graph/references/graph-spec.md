@@ -10,6 +10,8 @@ Use this reference when creating a graph through the `create-graph` skill. The u
 - Set `maxSteps`; it is required.
 - Name graph files with kebab-case: `.agent-graph/graphs/code-review-loop.json`.
 - Use lower snake_case for node ids: `approve_plan`, `route_review`.
+- Infer one presentation language from the user's request. Write all human-readable fields in that language while keeping machine identifiers in their required ASCII form.
+- Give every created node and parallel child an explicit localized `label`. Set all five localized `transitionLabels` fields, and give every router case/default an explicit localized `label`.
 - Define `nodes` as an array. Every node must include an explicit `id`.
 - Define only six node types: `prompt`, `subagent`, `tool`, `approval`, `router`, and `parallel`.
 - Omit compiler-derived fields: `capabilities`, `transitions`, and `approvalBindings`.
@@ -48,6 +50,7 @@ Do not use bare `{{data}}`, environment variables, shell expansion, filesystem g
 | `version` | Yes | string | Use `1.0.0` for a new graph. |
 | `description` | Yes | string | Short description shown by `/graph-list`. |
 | `mutationPolicy` | Yes | string | `read-only`, `mutating`, or legacy `approval-required`. Use `mutating` when nodes may change the workspace; `approval-required` remains available when every mutating node must be gated. |
+| `transitionLabels` | No | object | Localized canvas labels for compiler-derived edges. New graphs should set `next`, `approved`, `declined`, `default`, and `error`; omission preserves legacy English fallbacks. |
 | `start` | Yes | string | Node id where execution begins. |
 | `maxSteps` | Yes | positive integer | Maximum actual node attempts before the runtime stops. Include room for retries and loops. |
 | `nodes` | Yes | array | Ordered node definitions. Every node must include an explicit `id`. |
@@ -63,6 +66,8 @@ Every node supports these identity fields; flow and output fields are listed per
 | `id` | Yes | string | Lower snake_case node id. Must be unique in the graph. |
 | `type` | Yes | string | One of the six node types. |
 | `label` | No | string | Human-readable label for UI/status output. |
+
+The schema accepts a missing `label` for old graph files, but the graph creator must set it on every new top-level node and parallel child in the user's presentation language. Keep `id` as the stable ASCII machine identifier.
 
 Mutating `subagent` and `tool` nodes may also declare:
 
@@ -187,6 +192,8 @@ Use `router` nodes for deterministic equality routing.
 | `path` | Yes | string | Safe data path to inspect, such as `data.review.status`. |
 | `cases` | Yes | array | Ordered cases. Each case is `{ "equals": value, "to": "node_id" }` or `{ "equals": value, "done": true }`. |
 | `default` | Yes | object | Explicit fallback, either `{ "to": "node_id" }` or `{ "done": true }`. |
+| `cases[].label` | No | string | Human-readable branch label shown on the graph canvas. New graphs should always set it in the presentation language. |
+| `default.label` | No | string | Human-readable fallback branch label. New graphs should always set it in the presentation language. |
 
 Router cases compare primitive values exactly and in array order. Do not use regular expressions, JavaScript, natural-language conditions, or model calls.
 
@@ -213,37 +220,44 @@ When a child fails, the parallel node stops assigning queued children and waits 
   "schemaVersion": 1,
   "name": "review-then-implement",
   "version": "1.0.0",
-  "description": "Scout the repo, plan a change, request approval, implement, review, and fix once.",
+  "description": "检查仓库、制定修改计划、请求批准、执行实现、复核结果，并在需要时修复一次。",
   "mutationPolicy": "approval-required",
+  "transitionLabels": {
+    "next": "继续",
+    "approved": "已批准",
+    "declined": "已拒绝",
+    "default": "其他情况",
+    "error": "失败"
+  },
   "start": "scout",
   "maxSteps": 10,
   "nodes": [
     {
       "id": "scout",
       "type": "subagent",
-      "label": "Scout",
+      "label": "检查仓库",
       "agentName": "scout",
       "tools": ["read", "grep", "find", "ls"],
       "skills": [],
-      "systemPrompt": "Inspect the workspace without modifying files. Return concise findings with file references.",
-      "prompt": "Goal: {{goal}}\n\nFind the relevant files, existing patterns, risks, and tests to run. Do not edit files.",
+      "systemPrompt": "只读检查工作区，不要修改文件。用中文简洁返回发现，并附文件引用。",
+      "prompt": "目标：{{goal}}\n\n查找相关文件、既有模式、风险和需要运行的测试。不要编辑文件。",
       "outputKey": "findings",
       "next": "plan"
     },
     {
       "id": "plan",
       "type": "prompt",
-      "label": "Plan",
-      "systemPrompt": "Create a concise implementation plan with files to edit, verification, and risks.",
-      "prompt": "Goal: {{goal}}\n\nScout findings:\n{{data.findings}}\n\nDraft the implementation plan.",
+      "label": "制定计划",
+      "systemPrompt": "用中文制定简洁的实现计划，说明要修改的文件、验证方式和风险。",
+      "prompt": "目标：{{goal}}\n\n仓库检查结果：\n{{data.findings}}\n\n请拟定实现计划。",
       "outputKey": "plan",
       "next": "approve_plan"
     },
     {
       "id": "approve_plan",
       "type": "approval",
-      "label": "Approve Plan",
-      "title": "Approve graph implementation plan?",
+      "label": "批准计划",
+      "title": "是否批准工作流实现计划？",
       "message": "{{data.plan}}",
       "yes": "implement",
       "no": "revise_plan"
@@ -251,21 +265,21 @@ When a child fails, the parallel node stops assigning queued children and waits 
     {
       "id": "revise_plan",
       "type": "prompt",
-      "label": "Revise Plan",
-      "systemPrompt": "Revise a declined implementation plan. Make it more conservative and explicit.",
-      "prompt": "Goal: {{goal}}\n\nDeclined plan:\n{{data.plan}}\n\nScout findings:\n{{data.findings}}\n\nProduce a revised plan.",
+      "label": "修改计划",
+      "systemPrompt": "修改被拒绝的实现计划，使其更保守、更明确，并使用中文输出。",
+      "prompt": "目标：{{goal}}\n\n被拒绝的计划：\n{{data.plan}}\n\n仓库检查结果：\n{{data.findings}}\n\n请给出修改后的计划。",
       "outputKey": "plan",
       "next": "approve_plan"
     },
     {
       "id": "implement",
       "type": "subagent",
-      "label": "Implement",
+      "label": "执行实现",
       "agentName": "implement",
       "tools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
       "skills": [],
-      "systemPrompt": "Make only the approved workspace changes. Follow existing project patterns. Run focused verification when practical.",
-      "prompt": "Goal: {{goal}}\n\nApproved plan:\n{{data.plan}}\n\nScout findings:\n{{data.findings}}\n\nImplement the approved plan.",
+      "systemPrompt": "只执行已批准的工作区修改，遵循项目既有模式，并尽可能运行针对性验证。用中文汇报结果。",
+      "prompt": "目标：{{goal}}\n\n已批准的计划：\n{{data.plan}}\n\n仓库检查结果：\n{{data.findings}}\n\n请执行已批准的计划。",
       "outputKey": "implementation",
       "approvalNodeId": "approve_plan",
       "next": "review"
@@ -273,13 +287,13 @@ When a child fails, the parallel node stops assigning queued children and waits 
     {
       "id": "review",
       "type": "subagent",
-      "label": "Review",
+      "label": "复核结果",
       "agentName": "review",
       "tools": ["read", "grep", "find", "ls"],
       "skills": [],
       "parseJson": true,
-      "systemPrompt": "Review the changed workspace. Return only JSON: {\"status\":\"pass|needs_fix\",\"summary\":\"short summary\",\"requiredFixes\":[\"fix\"]}.",
-      "prompt": "Goal: {{goal}}\n\nImplementation report:\n{{data.implementation}}\n\nReview the work using read-only checks.",
+      "systemPrompt": "复核修改后的工作区。只返回 JSON：{\"status\":\"通过|需修复\",\"summary\":\"简短总结\",\"requiredFixes\":[\"修复项\"]}。",
+      "prompt": "目标：{{goal}}\n\n实现报告：\n{{data.implementation}}\n\n请使用只读检查复核本次工作。",
       "outputKey": "review",
       "failure": { "maxAttempts": 2 },
       "next": "route_review"
@@ -287,23 +301,23 @@ When a child fails, the parallel node stops assigning queued children and waits 
     {
       "id": "route_review",
       "type": "router",
-      "label": "Route Review",
+      "label": "判断复核结果",
       "path": "data.review.status",
       "cases": [
-        { "equals": "needs_fix", "to": "fix" },
-        { "equals": "pass", "done": true }
+        { "equals": "需修复", "to": "fix", "label": "需要修复" },
+        { "equals": "通过", "done": true, "label": "复核通过" }
       ],
-      "default": { "done": true }
+      "default": { "done": true, "label": "其他结果" }
     },
     {
       "id": "fix",
       "type": "subagent",
-      "label": "Fix",
+      "label": "修复问题",
       "agentName": "fix",
       "tools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
       "skills": [],
-      "systemPrompt": "Apply only the review-requested fixes. Keep the patch minimal and run focused verification.",
-      "prompt": "Goal: {{goal}}\n\nReview feedback:\n{{data.review}}\n\nPrevious implementation report:\n{{data.implementation}}\n\nApply the required fixes.",
+      "systemPrompt": "只处理复核提出的修复项，保持补丁最小，并运行针对性验证。用中文汇报结果。",
+      "prompt": "目标：{{goal}}\n\n复核反馈：\n{{data.review}}\n\n上次实现报告：\n{{data.implementation}}\n\n请完成所需修复。",
       "outputKey": "implementation",
       "approvalNodeId": "approve_plan",
       "next": "review"

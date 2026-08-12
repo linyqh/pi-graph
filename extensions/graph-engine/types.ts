@@ -137,6 +137,7 @@ export interface GraphStaticTransition {
 	from: string;
 	to?: string;
 	when?: string;
+	label?: string;
 }
 
 export interface GraphNodeCapabilities {

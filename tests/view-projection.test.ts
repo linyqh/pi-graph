@@ -16,7 +16,7 @@ function fixture(): { graph: GraphDefinition; state: GraphState } {
 		start: "route",
 		maxSteps: 6,
 		transitions: [
-			{ from: "route", to: "parallel", when: "ready" },
+			{ from: "route", to: "parallel", when: "ready", label: "已就绪" },
 			{ from: "parallel", to: "route", when: "retry" },
 		],
 		nodes: {
@@ -80,6 +80,7 @@ test("projectGraphRunView exposes stable topology and runtime status without gra
 			{ from: "lane_b", to: "route", kind: "loop", traversedCount: 0 },
 		],
 	);
+	assert.equal(projection.edges[0]?.label, "已就绪");
 	assert.equal("data" in projection, false);
 });
 

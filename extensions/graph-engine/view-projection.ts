@@ -41,13 +41,15 @@ function transitionList(graph: GraphDefinition): Array<{ from: string; to: strin
 	if (graph.transitions && graph.transitions.length > 0) {
 		const declared = graph.transitions
 			.filter((edge): edge is typeof edge & { to: string } => Boolean(edge.to))
-			.map((edge) => ({ from: edge.from, to: edge.to, label: edge.when }));
-		const declaredKeys = new Set(declared.map((edge) => `${edge.from}\0${edge.to}\0${edge.label ?? ""}`));
+			.map((edge) => ({ from: edge.from, to: edge.to, label: edge.label ?? edge.when }));
+		const declaredFailures = new Set(graph.transitions
+			.filter((edge) => edge.when === "error" && edge.to)
+			.map((edge) => `${edge.from}\0${edge.to}`));
 		const fallbackFailures = Object.values(graph.nodes).flatMap((node) => {
 			const target = node.failure?.onError;
 			if (!target) return [];
 			const edge = { from: node.id, to: target, label: "error" };
-			return declaredKeys.has(`${edge.from}\0${edge.to}\0${edge.label}`) ? [] : [edge];
+			return declaredFailures.has(`${edge.from}\0${edge.to}`) ? [] : [edge];
 		});
 		return [...declared, ...fallbackFailures];
 	}

@@ -9,6 +9,17 @@ description: Create validated Pi graph workflow specs through an interactive sha
 
 Read `references/graph-spec.md` before asking questions, drafting a graph, or calling any tool. Use it as the source of truth for JSON fields, node types, safety rules, and examples.
 
+## Language Contract
+
+- Infer the graph's presentation language from the language the user uses for the initial workflow idea and subsequent answers. Ignore code, identifiers, quoted source text, and product names when inferring it.
+- If the user explicitly requests a language, that choice wins. If the conversation is genuinely ambiguous, confirm the language before drafting; otherwise do not add a language question.
+- Conduct the interview, shared-understanding summary, and confirmation in that presentation language.
+- Write every user-visible graph field in that language: top-level `description`; every top-level and parallel-child `label`; approval `title` and `message`; human-facing `systemPrompt` and `prompt` text; `transitionLabels`; and every router case/default `label`.
+- Require a `label` for every created node even though the schema keeps it optional for backward compatibility. This prevents the UI from falling back to machine ids.
+- Set all five `transitionLabels` fields (`next`, `approved`, `declined`, `default`, and `error`) for every new graph. Give every router case and default an explicit localized `label` so the graph canvas never falls back to compiler-generated English text.
+- When a prompt node produces the final answer or other user-facing prose, explicitly instruct it to answer in the presentation language unless the user requested a different output language.
+- Keep machine-facing fields in their required portable form: `name` stays ASCII kebab-case; `id`, `agentName`, and `outputKey` stay ASCII lower snake_case; tool names, Skill names, provider/model ids, JSON keys, and required protocol enum values remain unchanged. Do not translate identifiers merely for display.
+
 ## Workflow
 
 1. Restate the user's graph idea as a decision tree.
@@ -33,6 +44,7 @@ Read `references/graph-spec.md` before asking questions, drafting a graph, or ca
 
 4. Draft the JSON graph spec.
    - Use only the DSL in `references/graph-spec.md`.
+   - Apply the Language Contract to all human-readable fields and keep machine identifiers separate from display text.
    - Keep node ids lower snake_case.
    - Keep the graph name kebab-case and aligned with `.agent-graph/graphs/<kebab-name>.json`.
    - Make subagent `tools` explicit. For a non-read-only subagent, start with Pi's four default coding tools: `read`, `bash`, `edit`, and `write`; add `grep`, `find`, or `ls` only when its task needs them.
@@ -49,7 +61,7 @@ Read `references/graph-spec.md` before asking questions, drafting a graph, or ca
    - Do not include compiler-derived `capabilities`, `transitions`, or `approvalBindings`.
 
 5. Confirm shared understanding before creation.
-   - When the decision frontier is empty, show a concise graph summary: file path, purpose, safety policy, start node, nodes, each subagent's tool and Skill allowlists, approval gates, failure/retry policy, router cases, parallel lanes, and any limits.
+   - When the decision frontier is empty, show a concise graph summary in the presentation language: file path, purpose, safety policy, start node, nodes, localized transition labels, each subagent's tool and Skill allowlists, approval gates, failure/retry policy, router cases, parallel lanes, and any limits.
    - Ask for explicit shared-understanding confirmation.
    - Do not call `graph_create` until the user clearly confirms.
 

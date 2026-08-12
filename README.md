@@ -91,17 +91,26 @@ pi install "$PWD"
   "version": "1.0.0",
   "description": "并行检查项目质量并汇总报告。",
   "mutationPolicy": "read-only",
+  "transitionLabels": {
+    "next": "继续",
+    "approved": "已批准",
+    "declined": "已拒绝",
+    "default": "其他情况",
+    "error": "失败"
+  },
   "start": "inspect",
   "maxSteps": 6,
   "nodes": [
     {
       "id": "inspect",
       "type": "parallel",
+      "label": "并行检查",
       "concurrency": 2,
       "children": [
         {
           "id": "test_review",
           "type": "subagent",
+          "label": "检查测试覆盖",
           "agentName": "test_reviewer",
           "tools": ["read", "grep", "find", "ls"],
           "skills": [],
@@ -110,6 +119,7 @@ pi install "$PWD"
         {
           "id": "code_review",
           "type": "subagent",
+          "label": "检查实现风险",
           "agentName": "code_reviewer",
           "tools": ["read", "grep", "find", "ls"],
           "skills": [],
@@ -121,6 +131,7 @@ pi install "$PWD"
     {
       "id": "summarize",
       "type": "prompt",
+      "label": "汇总发现",
       "prompt": "目标：{{goal}}\n\n并行结果：{{data.inspect}}\n\n汇总发现。",
       "outputKey": "finalSummary",
       "failure": {
@@ -131,6 +142,7 @@ pi install "$PWD"
     {
       "id": "report_failure",
       "type": "prompt",
+      "label": "说明失败原因",
       "prompt": "汇总节点失败：{{data.__graphError.message}}。给出可执行的排查建议。",
       "outputKey": "finalSummary"
     }
@@ -142,6 +154,7 @@ pi install "$PWD"
 
 - 图名匹配 `^[a-z][a-z0-9-]{0,63}$`，文件固定为 `.agent-graph/graphs/<name>.json`。
 - 节点 ID 匹配 `^[a-z][a-z0-9_]{0,63}$`，包括并行子节点在内全局唯一。
+- 创建器会根据用户对话语言生成 `description`、全部节点 `label`、审批文案、提示词和分支标签；机器字段仍使用规定的 ASCII 格式。`transitionLabels` 可本地化编译器生成的继续、审批、默认和失败连线，旧图省略时仍使用英文回退。
 - `version` 省略时规范化为 `1.0.0`；`maxSteps` 为 `1..256`；全部节点最多 64 个。
 - 单文件最多 256 KiB；单个提示或系统提示模板最多 32 KiB。
 - 未知字段、文件名不匹配、路径穿越、符号链接和原型链路径都会被拒绝。

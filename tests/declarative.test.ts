@@ -268,6 +268,81 @@ test("compileDeclarativeGraphSpec preserves top-level failure policies and error
 	);
 });
 
+test("compileDeclarativeGraphSpec projects localized transition labels without changing machine ids", () => {
+	const graph = compileDeclarativeGraphSpec({
+		schemaVersion: 1,
+		name: "localized-flow",
+		version: "1.0.0",
+		description: "使用中文展示节点和连线。",
+		mutationPolicy: "read-only",
+		transitionLabels: {
+			next: "继续",
+			approved: "已批准",
+			declined: "已拒绝",
+			default: "其他情况",
+			error: "失败",
+		},
+		start: "start_step",
+		maxSteps: 8,
+		nodes: [
+			{
+				id: "start_step",
+				type: "prompt",
+				label: "准备计划",
+				prompt: "准备 {{goal}}。",
+				next: "approve_plan",
+				failure: { onError: "repair_step" },
+			},
+			{
+				id: "approve_plan",
+				type: "approval",
+				label: "批准计划",
+				title: "是否批准？",
+				message: "请确认计划。",
+				yes: "route_result",
+				no: "done_step",
+			},
+			{
+				id: "route_result",
+				type: "router",
+				label: "判断结果",
+				path: "data.status",
+				cases: [{ equals: "needs_fix", to: "repair_step", label: "需要修复" }],
+				default: { to: "done_step", label: "无需修复" },
+			},
+			{
+				id: "repair_step",
+				type: "prompt",
+				label: "修复问题",
+				prompt: "修复问题。",
+				next: "done_step",
+			},
+			{ id: "done_step", type: "prompt", label: "完成", prompt: "用中文总结。" },
+		],
+	});
+
+	assert.deepEqual(graph.transitions, [
+		{ from: "start_step", to: "approve_plan", when: "next", label: "继续" },
+		{ from: "start_step", to: "repair_step", when: "error", label: "失败" },
+		{ from: "approve_plan", to: "route_result", when: "approved", label: "已批准" },
+		{ from: "approve_plan", to: "done_step", when: "declined", label: "已拒绝" },
+		{ from: "route_result", to: "repair_step", when: "data.status equals \"needs_fix\"", label: "需要修复" },
+		{ from: "route_result", to: "done_step", when: "default", label: "无需修复" },
+		{ from: "repair_step", to: "done_step", when: "next", label: "继续" },
+	]);
+	assert.deepEqual(Object.keys(graph.nodes), ["start_step", "approve_plan", "route_result", "repair_step", "done_step"]);
+	assert.match(renderDeclarativeGraphSummary({
+		schemaVersion: 1,
+		name: "summary-localized-flow",
+		description: "中文摘要。",
+		mutationPolicy: "read-only",
+		transitionLabels: { next: "继续", approved: "已批准", declined: "已拒绝", default: "其他情况", error: "失败" },
+		start: "done_step",
+		maxSteps: 1,
+		nodes: [{ id: "done_step", type: "prompt", label: "完成", prompt: "完成。" }],
+	}), /transitionLabels=.*继续.*已批准.*已拒绝.*其他情况.*失败/);
+});
+
 test("compiled templates render safely and preserve exact tool arg placeholder types", async () => {
 	const graph = compileDeclarativeGraphSpec(validSpec());
 	const executionServices = services();

@@ -40,6 +40,16 @@ const FailurePolicySchema = Type.Object({
 const FailurePolicyFieldSchema = {
 	failure: Type.Optional(FailurePolicySchema),
 };
+const TransitionLabelsSchema = Type.Object({
+	next: Type.Optional(Type.String({ minLength: 1 })),
+	approved: Type.Optional(Type.String({ minLength: 1 })),
+	declined: Type.Optional(Type.String({ minLength: 1 })),
+	default: Type.Optional(Type.String({ minLength: 1 })),
+	error: Type.Optional(Type.String({ minLength: 1 })),
+}, {
+	additionalProperties: false,
+	description: "Localized labels for compiler-derived graph edges. Omitted fields keep the legacy English labels.",
+});
 const PromptFieldsSchema = {
 	systemPrompt: Type.Optional(StringTemplateSchema),
 	prompt: StringTemplateSchema,
@@ -100,21 +110,25 @@ const ApprovalNodeSchema = Type.Object({
 const RouterTargetCaseSchema = Type.Object({
 	equals: ScalarSchema,
 	to: Type.String({ pattern: NODE_ID_PATTERN }),
+	label: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 
 const RouterDoneCaseSchema = Type.Object({
 	equals: ScalarSchema,
 	done: Type.Literal(true),
+	label: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 
 const RouterCaseSchema = Type.Union([RouterTargetCaseSchema, RouterDoneCaseSchema]);
 
 const RouterTargetDefaultSchema = Type.Object({
 	to: Type.String({ pattern: NODE_ID_PATTERN }),
+	label: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 
 const RouterDoneDefaultSchema = Type.Object({
 	done: Type.Literal(true),
+	label: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 
 const RouterDefaultSchema = Type.Union([RouterTargetDefaultSchema, RouterDoneDefaultSchema]);
@@ -156,6 +170,7 @@ export const DeclarativeGraphSpecSchema = Type.Object({
 	version: Type.Optional(Type.String({ minLength: 1, default: "1.0.0" })),
 	description: Type.String({ minLength: 1 }),
 	mutationPolicy: Type.Union([Type.Literal("read-only"), Type.Literal("mutating"), Type.Literal("approval-required")]),
+	transitionLabels: Type.Optional(TransitionLabelsSchema),
 	start: Type.String({ pattern: NODE_ID_PATTERN }),
 	maxSteps: Type.Integer({ minimum: 1, maximum: 256 }),
 	nodes: Type.Array(DeclarativeGraphNodeSchema, { minItems: 1, maxItems: MAX_NODE_COUNT }),
@@ -165,6 +180,13 @@ export type DeclarativeToolName = typeof SAFE_TOOLS[number];
 export type DeclarativeScalar = string | number | boolean | null;
 export type DeclarativeTemplate = string;
 export type DeclarativeNodeFailurePolicy = GraphNodeFailurePolicy;
+export interface DeclarativeTransitionLabels {
+	next?: string;
+	approved?: string;
+	declined?: string;
+	default?: string;
+	error?: string;
+}
 export type DeclarativePromptLikeNode = {
 	id: string;
 	type: "prompt" | "subagent";
@@ -212,8 +234,11 @@ export type DeclarativeRouterNode = {
 	type: "router";
 	label?: string;
 	path: string;
-	cases: Array<{ equals: DeclarativeScalar; to: string } | { equals: DeclarativeScalar; done: true }>;
-	default: { to: string } | { done: true };
+	cases: Array<
+		| { equals: DeclarativeScalar; to: string; label?: string }
+		| { equals: DeclarativeScalar; done: true; label?: string }
+	>;
+	default: { to: string; label?: string } | { done: true; label?: string };
 };
 export type DeclarativeParallelNode = {
 	id: string;
@@ -241,6 +266,7 @@ export interface DeclarativeGraphSpec {
 	version: string;
 	description: string;
 	mutationPolicy: "read-only" | "mutating" | "approval-required";
+	transitionLabels?: DeclarativeTransitionLabels;
 	start: string;
 	maxSteps: number;
 	nodes: DeclarativeGraphNode[];
@@ -709,16 +735,52 @@ function deriveTransitions(spec: DeclarativeGraphSpec) {
 	const transitions: RegisteredGraphDefinition["transitions"] = [];
 	for (const node of spec.nodes) {
 		if ("next" in node && node.next) {
-			transitions.push({ from: node.id, to: node.next, when: "next" });
+			transitions.push({
+				from: node.id,
+				to: node.next,
+				when: "next",
+				...(spec.transitionLabels?.next ? { label: spec.transitionLabels.next } : {}),
+			});
 		} else if (node.type === "approval") {
-			transitions.push({ from: node.id, to: node.yes, when: "approved" });
-			if (node.no) transitions.push({ from: node.id, to: node.no, when: "declined" });
+			transitions.push({
+				from: node.id,
+				to: node.yes,
+				when: "approved",
+				...(spec.transitionLabels?.approved ? { label: spec.transitionLabels.approved } : {}),
+			});
+			if (node.no) {
+				transitions.push({
+					from: node.id,
+					to: node.no,
+					when: "declined",
+					...(spec.transitionLabels?.declined ? { label: spec.transitionLabels.declined } : {}),
+				});
+			}
 		} else if (node.type === "router") {
-			for (const entry of node.cases) transitions.push({ from: node.id, to: "to" in entry ? entry.to : undefined, when: `${node.path} equals ${JSON.stringify(entry.equals)}` });
-			transitions.push({ from: node.id, to: "to" in node.default ? node.default.to : undefined, when: "default" });
+			for (const entry of node.cases) {
+				transitions.push({
+					from: node.id,
+					to: "to" in entry ? entry.to : undefined,
+					when: `${node.path} equals ${JSON.stringify(entry.equals)}`,
+					...(entry.label ? { label: entry.label } : {}),
+				});
+			}
+			transitions.push({
+				from: node.id,
+				to: "to" in node.default ? node.default.to : undefined,
+				when: "default",
+				...(node.default.label || spec.transitionLabels?.default
+					? { label: node.default.label ?? spec.transitionLabels?.default }
+					: {}),
+			});
 		}
 		if ("failure" in node && node.failure?.onError) {
-			transitions.push({ from: node.id, to: node.failure.onError, when: "error" });
+			transitions.push({
+				from: node.id,
+				to: node.failure.onError,
+				when: "error",
+				...(spec.transitionLabels?.error ? { label: spec.transitionLabels.error } : {}),
+			});
 		}
 	}
 	return transitions;
@@ -800,6 +862,7 @@ export function renderDeclarativeGraphSummary(value: unknown): string {
 		`${spec.name}@${spec.version}`,
 		`${nodes.length} nodes, start=${spec.start}, maxSteps=${spec.maxSteps}`,
 		`mutationPolicy=${spec.mutationPolicy}`,
+		...(spec.transitionLabels ? [`transitionLabels=${JSON.stringify(spec.transitionLabels)}`] : []),
 		`sha256=${serialization.sha256}`,
 		mutating.length > 0 ? `mutatingNodes=${mutating.map((node) => node.id).join(",")}` : "mutatingNodes=none",
 		mutatingTools.length > 0 ? `mutatingTools=${mutatingTools.join(",")}` : "mutatingTools=none",
