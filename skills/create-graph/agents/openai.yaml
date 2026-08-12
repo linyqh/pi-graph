@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Graph"
+  short_description: "Interview and create safe Pi graph workflows"
+  default_prompt: "Use $create-graph to turn my workflow idea into a validated project graph."

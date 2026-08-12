@@ -1,0 +1,313 @@
+import {
+	createBashTool,
+	createEditTool,
+	createFindTool,
+	createGrepTool,
+	createLsTool,
+	createReadTool,
+	createWriteTool,
+} from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Compile } from "typebox/compile";
+import type {
+	GraphExecutionOutput,
+	GraphExecutionServices,
+	GraphPromptRequest,
+	GraphSubagentRequest,
+	GraphToolName,
+	GraphToolRequest,
+	JsonObject,
+} from "./types.ts";
+import { parseJsonFromText, runPiSubagent } from "./pi-process.ts";
+import { resolveAssignedSkills } from "./skill-selection.ts";
+
+const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_OUTPUT_LINES = 2000;
+
+type ToolMap = ReturnType<typeof createToolMap>;
+
+function createToolMap(cwd: string) {
+	return {
+		read: createReadTool(cwd),
+		bash: createBashTool(cwd),
+		edit: createEditTool(cwd),
+		write: createWriteTool(cwd),
+		grep: createGrepTool(cwd),
+		find: createFindTool(cwd),
+		ls: createLsTool(cwd),
+	};
+}
+
+function byteLength(text: string): number {
+	return Buffer.byteLength(text, "utf8");
+}
+
+export function truncateText(text: string): { text: string; truncated: boolean; bytes: number; lines: number } {
+	const lines = text.split("\n");
+	let truncated = false;
+	let selected = lines;
+	const marker = `[graph-engine truncated output to ${MAX_OUTPUT_BYTES} bytes / ${MAX_OUTPUT_LINES} lines]`;
+
+	if (lines.length > MAX_OUTPUT_LINES) {
+		selected = lines.slice(0, MAX_OUTPUT_LINES - 1);
+		truncated = true;
+	}
+
+	let output = selected.join("\n");
+	const markerBytes = byteLength(`\n${marker}`);
+	while (byteLength(output) + (truncated ? markerBytes : 0) > MAX_OUTPUT_BYTES) {
+		output = output.slice(0, Math.max(0, output.length - 512));
+		truncated = true;
+	}
+
+	if (truncated) {
+		while (byteLength(output) + markerBytes > MAX_OUTPUT_BYTES) {
+			output = output.slice(0, Math.max(0, output.length - 128));
+		}
+		output = `${output}\n${marker}`;
+	}
+
+	return {
+		text: output,
+		truncated,
+		bytes: byteLength(text),
+		lines: lines.length,
+	};
+}
+
+function truncateValue(value: unknown): unknown {
+	if (typeof value === "string") return truncateText(value).text;
+	if (Array.isArray(value)) return value.map((item) => truncateValue(item));
+	if (!value || typeof value !== "object") return value;
+	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, truncateValue(entry)]));
+}
+
+function normalizeError(error: unknown, kind: string): Error {
+	if (error instanceof Error) {
+		const normalized = new Error(`${kind}: ${error.message}`, { cause: error });
+		normalized.name = error.name;
+		return normalized;
+	}
+	return new Error(`${kind}: ${String(error)}`);
+}
+
+function abortedError(message: string): Error {
+	const error = new Error(message);
+	error.name = "AbortError";
+	return error;
+}
+
+function textFromContent(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) => {
+			if (part && typeof part === "object" && (part as { type?: unknown }).type === "text") {
+				return String((part as { text?: unknown }).text ?? "");
+			}
+			return "";
+		})
+		.filter(Boolean)
+		.join("\n");
+}
+
+function resolveModel(context: ExtensionContext, provider?: string, model?: string) {
+	if (provider || model) {
+		const providerName = provider ?? context.model?.provider;
+		if (!providerName || !model) throw new Error("Prompt node model override requires both provider and model when no current provider is available.");
+		const found = context.modelRegistry.find(providerName, model);
+		if (!found) throw new Error(`Prompt node model not found: ${providerName}/${model}`);
+		return found;
+	}
+	if (!context.model) throw new Error("Prompt node requires an active ExtensionContext model.");
+	return context.model;
+}
+
+function buildPromptMessages(request: GraphPromptRequest) {
+	return [
+		{
+			role: "user" as const,
+			content: [{ type: "text" as const, text: request.prompt }],
+			timestamp: Date.now(),
+		},
+	];
+}
+
+function metadataBase(kind: string, extra: JsonObject = {}): JsonObject {
+	return {
+		kind,
+		trust: "project",
+		approval: "host-compatible",
+		...extra,
+	};
+}
+
+export function createGraphExecutionServices(context?: ExtensionContext): GraphExecutionServices {
+	const toolsByCwd = new Map<string, ToolMap>();
+
+	function getTools(cwd: string): ToolMap {
+		let tools = toolsByCwd.get(cwd);
+		if (!tools) {
+			tools = createToolMap(cwd);
+			toolsByCwd.set(cwd, tools);
+		}
+		return tools;
+	}
+
+	return {
+		async completePrompt(request) {
+			if (!context) throw new Error("Prompt node requires injectable GraphExecutionServices with an ExtensionContext.");
+			if (!request.prompt.trim()) throw new Error("Prompt node prompt was empty.");
+
+			const model = resolveModel(context, request.provider, request.model);
+			try {
+				const response = await context.modelRegistry.complete(
+					model,
+					{
+						systemPrompt: request.systemPrompt,
+						messages: buildPromptMessages(request),
+					},
+					{
+						signal: request.signal,
+						cacheRetention: "none",
+					},
+				);
+				if (response.stopReason === "aborted") {
+					throw abortedError(response.errorMessage || "Prompt model was aborted.");
+				}
+				if (response.stopReason === "error") {
+					throw new Error(response.errorMessage || "Prompt model stopped with an error.");
+				}
+				const rawText = textFromContent(response.content);
+				if (!rawText.trim()) throw new Error("Prompt node returned empty output.");
+				const truncated = truncateText(rawText);
+				const output = request.parseJson ? parseJsonFromText(rawText) : truncated.text;
+				return {
+					output: truncateValue(output),
+					text: truncated.text,
+					meta: metadataBase("prompt", {
+						model: `${model.provider}/${model.id}`,
+						usage: response.usage,
+						truncated: truncated.truncated,
+						bytes: truncated.bytes,
+						lines: truncated.lines,
+						tools: [],
+					}),
+				};
+			} catch (error) {
+				throw normalizeError(error, "Prompt node failed");
+			}
+		},
+
+		async runSubagent(request) {
+			if (!request.agentName.trim()) throw new Error("Subagent node requires agentName.");
+			if (!request.prompt.trim()) throw new Error(`Subagent node ${request.agentName} prompt was empty.`);
+
+			try {
+				const sessionId = request.sessionId ?? randomUUID();
+				const provider = request.provider ?? context?.model?.provider;
+				const model = request.model ?? context?.model?.id;
+				const systemPrompt = context?.getSystemPrompt?.() ?? "";
+				const skills = resolveAssignedSkills(systemPrompt, request.skills);
+				const result = await runPiSubagent({
+					agentName: request.agentName,
+					sessionId,
+					sessionName: `Subagent · ${request.agentName}`,
+					prompt: request.prompt,
+					systemPrompt: request.systemPrompt,
+					model,
+					provider,
+					tools: request.tools,
+					skills,
+					cwd: request.cwd,
+					signal: request.signal,
+				});
+
+				if (result.stopReason === "aborted") {
+					throw abortedError(result.errorMessage || result.stderr || `Subagent ${request.agentName} was aborted.`);
+				}
+				if (result.exitCode !== 0 || result.stopReason === "error") {
+					throw new Error(result.errorMessage || result.stderr || `Subagent ${request.agentName} failed.`);
+				}
+				if (!result.finalText.trim()) throw new Error(`Subagent ${request.agentName} returned empty output.`);
+
+				const output = request.parseJson ? parseJsonFromText(result.finalText) : result.finalText;
+				return {
+					output: truncateValue(output),
+					text: truncateText(result.finalText).text,
+					meta: metadataBase("subagent", {
+						agentName: request.agentName,
+						model: result.model,
+						usage: result.usage,
+						stopReason: result.stopReason,
+						tools: request.tools,
+						skills: request.skills,
+						child: {
+							agentName: request.agentName,
+							sessionId: result.sessionId ?? sessionId,
+							isolation: "pi-json-session",
+							messagesRetained: result.usage.turns,
+						},
+					}),
+				};
+			} catch (error) {
+				throw normalizeError(error, `Subagent ${request.agentName} failed`);
+			}
+		},
+
+		async invokeBuiltinTool(request) {
+			const tool = getTools(request.cwd)[request.tool];
+			if (!tool) throw new Error(`Unsupported graph tool: ${request.tool}`);
+
+			const prepared = typeof tool.prepareArguments === "function" ? tool.prepareArguments(request.args) : request.args;
+			const validator = Compile(tool.parameters);
+			if (!validator.Check(prepared)) {
+				const detail = validator.Errors(prepared)
+					.slice(0, 3)
+					.map((error) => error.message)
+					.join("; ");
+				throw new Error(`Tool ${request.tool} arguments failed schema validation${detail ? `: ${detail}` : "."}`);
+			}
+
+			try {
+				const result = await tool.execute(
+					`graph-${request.tool}-${Date.now().toString(36)}`,
+					prepared as never,
+					request.signal,
+					undefined,
+				);
+				if ((result as { isError?: boolean }).isError) {
+					const text = textFromContent(result.content);
+					throw new Error(text || `Tool ${request.tool} returned an error result.`);
+				}
+				const text = textFromContent(result.content);
+				return {
+					output: truncateValue({
+						tool: request.tool,
+						args: request.args,
+						content: result.content,
+						details: result.details,
+					}),
+					text: truncateText(text).text,
+					meta: metadataBase("tool", {
+						tool: request.tool,
+						args: request.args,
+						details: truncateValue(result.details),
+					}),
+				};
+			} catch (error) {
+				throw normalizeError(error, `Tool ${request.tool} failed`);
+			}
+		},
+
+		truncate: truncateValue,
+	};
+}
+
+export function servicesFromContext(ctx: unknown): GraphExecutionServices {
+	const holder = ctx as {
+		services?: GraphExecutionServices;
+		extensionContext?: ExtensionContext;
+	};
+	return holder.services ?? createGraphExecutionServices(holder.extensionContext);
+}
