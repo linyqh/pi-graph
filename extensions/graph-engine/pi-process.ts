@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSkillSelectionArgs, type AssignedSkill } from "./skill-selection.ts";
+import { graphChildProcessEnv } from "./host-bridge.ts";
 
 const MAX_CAPTURED_STDERR = 50 * 1024;
 
@@ -40,6 +42,52 @@ export interface PiPromptResult {
 	sessionId?: string;
 }
 
+/**
+ * Whether a `pi` executable is reachable on PATH.
+ *
+ * Node has no `which`, and getting this wrong matters: a Pi installed by the
+ * user must keep winning over the copy this package happens to sit next to.
+ */
+function hasPiOnPath(): boolean {
+	const names = process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi.bat"] : ["pi"];
+	for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (!directory) continue;
+		for (const name of names) {
+			try {
+				if (fs.statSync(path.join(directory, name)).isFile()) return true;
+			} catch {
+				// Unreadable or missing PATH entries simply do not provide Pi.
+			}
+		}
+	}
+	return false;
+}
+
+/**
+ * The Pi CLI entrypoint of the package this extension is installed alongside.
+ *
+ * Hosts that embed Pi rather than running its CLI — Pi Web, for one — have no
+ * `pi` on PATH, so falling straight through to the bare command turns every
+ * subagent node into an ENOENT.
+ *
+ * Walks the node_modules directories Node itself would search instead of
+ * resolving the package: `@earendil-works/pi-coding-agent` publishes an
+ * `exports` map that does not list `./package.json`, so asking for it throws.
+ */
+export function resolveInstalledPiCli(): string | undefined {
+	const packageName = "@earendil-works/pi-coding-agent";
+	try {
+		const candidates = createRequire(import.meta.url).resolve.paths(packageName) ?? [];
+		for (const directory of candidates) {
+			const cli = path.join(directory, packageName, "dist", "cli.js");
+			if (fs.existsSync(cli)) return cli;
+		}
+	} catch {
+		// Fall through to the Pi command when the install cannot be located.
+	}
+	return undefined;
+}
+
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const execName = path.basename(process.execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
@@ -54,6 +102,11 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 		} catch {
 			// Fall through to the Pi command when the embedding host entrypoint cannot be resolved.
 		}
+	}
+
+	if (!hasPiOnPath()) {
+		const installedCli = resolveInstalledPiCli();
+		if (installedCli) return { command: process.execPath, args: [installedCli, ...args] };
 	}
 
 	return { command: "pi", args };
@@ -116,6 +169,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 		result.exitCode = await new Promise<number>((resolve) => {
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: options.cwd,
+				env: graphChildProcessEnv(),
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});

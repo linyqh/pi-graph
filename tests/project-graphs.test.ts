@@ -384,7 +384,7 @@ test("project graph checkpoints resume with an unchanged hash and reject changed
 			async runSubagent() {
 				throw new Error("unexpected subagent");
 			},
-			async invokeBuiltinTool() {
+			async invokeTool() {
 				throw new Error("unexpected tool");
 			},
 			truncate(value) {

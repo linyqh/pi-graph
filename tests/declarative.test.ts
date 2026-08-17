@@ -154,7 +154,7 @@ function services(overrides: Partial<GraphExecutionServices> = {}): GraphExecuti
 		async runSubagent(request) {
 			return { output: { agent: request.agentName, prompt: request.prompt, tools: request.tools }, text: request.prompt, meta: { kind: "subagent" } };
 		},
-		async invokeBuiltinTool(request) {
+		async invokeTool(request) {
 			return { output: request.args, text: "tool", meta: { kind: "tool", tool: request.tool } };
 		},
 		truncate(value) {
@@ -721,6 +721,83 @@ test("declarative summary exposes each subagent tool allowlist", () => {
 	assert.match(summary, /subagentTools=implement:\[read,bash,edit,write,grep\]/);
 	assert.match(summary, /subagentSkills=implement:\[code-review\]/);
 	assert.match(summary, /failurePolicies=implement:\[maxAttempts=1,onError=none\]/);
+});
+
+test("custom session tools are accepted and stay read-only until a node declares otherwise", () => {
+	const spec = {
+		...validSpec(),
+		mutationPolicy: "read-only",
+		start: "pull",
+		nodes: [
+			{
+				id: "pull",
+				type: "tool",
+				tool: "fpa_query",
+				args: { sql: "select 1" },
+				next: "analyse",
+			},
+			{
+				id: "analyse",
+				type: "subagent",
+				agentName: "analyst",
+				tools: ["read", "fpa_query", "fpa_calc"],
+				skills: [],
+				prompt: "Analyse {{data.pull}}.",
+			},
+		],
+	};
+
+	const graph = compileDeclarativeGraphSpec(spec);
+	assert.equal(graph.nodes.pull.capabilities?.mutatesWorkspace, false);
+	assert.equal(graph.nodes.analyse.capabilities?.mutatesWorkspace, false);
+	assert.deepEqual(graph.capabilities?.find((capability) => capability.id === "analyse")?.tools, ["fpa_calc", "fpa_query", "read"]);
+});
+
+test("a node may declare that a custom tool mutates, and then obeys the mutating rules", () => {
+	const mutatingNode = {
+		id: "publish",
+		type: "tool",
+		tool: "fpa_write_back",
+		args: { table: "forecast" },
+		mutates: true,
+	};
+
+	assert.throws(
+		() => parseDeclarativeGraphSpec({
+			...validSpec(),
+			mutationPolicy: "read-only",
+			start: "publish",
+			nodes: [mutatingNode],
+		}),
+		/read-only mutationPolicy cannot contain mutating tool or subagent nodes/,
+	);
+	assert.throws(
+		() => parseDeclarativeGraphSpec({
+			...validSpec(),
+			nodes: [{ id: "fan_out", type: "parallel", children: [{ ...mutatingNode }] }],
+		}),
+		/read-only/,
+	);
+
+	const graph = compileDeclarativeGraphSpec({
+		...validSpec(),
+		mutationPolicy: "mutating",
+		start: "publish",
+		nodes: [mutatingNode],
+	});
+	assert.equal(graph.nodes.publish.capabilities?.mutatesWorkspace, true);
+	assert.equal(graph.nodes.publish.capabilities?.usesShell, false);
+});
+
+test("declarative tool names must still look like tool names", () => {
+	assert.throws(
+		() => parseDeclarativeGraphSpec({
+			...validSpec(),
+			start: "bad_tool",
+			nodes: [{ id: "bad_tool", type: "tool", tool: "not a tool name", args: {} }],
+		}),
+		/pattern|must match/,
+	);
 });
 
 test("parallel validation rejects mutating children and excessive fan-out", () => {

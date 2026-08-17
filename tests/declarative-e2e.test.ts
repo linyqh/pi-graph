@@ -85,7 +85,7 @@ test("a generated read-only graph runs router and parallel branches end to end",
 		async runSubagent() {
 			throw new Error("unexpected subagent");
 		},
-		async invokeBuiltinTool() {
+		async invokeTool() {
 			throw new Error("unexpected tool");
 		},
 		truncate(value) {
@@ -141,7 +141,7 @@ test("a generated graph can route an exhausted failure into a repair prompt", as
 		async runSubagent() {
 			throw new Error("unexpected subagent");
 		},
-		async invokeBuiltinTool() {
+		async invokeTool() {
 			throw new Error("unexpected tool");
 		},
 		truncate(value) {
@@ -189,7 +189,7 @@ test("a generated mutating graph executes in a trusted project without approval"
 		async runSubagent() {
 			throw new Error("unexpected subagent");
 		},
-		async invokeBuiltinTool(request) {
+		async invokeTool(request) {
 			writes += 1;
 			assert.deepEqual(request.args, { path: "RESULT.md", content: "ship direct change" });
 			return output("written", "tool");
@@ -247,7 +247,7 @@ test("a generated mutating graph executes only after its approval node succeeds"
 		async runSubagent() {
 			throw new Error("unexpected subagent");
 		},
-		async invokeBuiltinTool(request) {
+		async invokeTool(request) {
 			writes += 1;
 			assert.deepEqual(request.args, { path: "RESULT.md", content: "ship approved change" });
 			return output("written", "tool");

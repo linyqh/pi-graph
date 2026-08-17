@@ -3,8 +3,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { buildSubagentSystemPrompt, buildToolSelectionArgs, parseJsonFromText, runPiSubagent } from "../extensions/graph-engine/pi-process.ts";
+import { buildSubagentSystemPrompt, buildToolSelectionArgs, parseJsonFromText, resolveInstalledPiCli, runPiSubagent } from "../extensions/graph-engine/pi-process.ts";
 import { truncateText } from "../extensions/graph-engine/services.ts";
+
+test("subagent tool selection passes any session tool name through to the child", () => {
+	assert.deepEqual(buildToolSelectionArgs(["read", "fpa_query", "fpa_calc"]), ["--tools", "read,fpa_query,fpa_calc"]);
+});
+
+test("locating the installed Pi CLI never throws and only reports a real file", () => {
+	// Absent from this package's own devDependencies, so the assertion has to
+	// hold both ways: hosts that embed Pi resolve it, this checkout does not.
+	const cli = resolveInstalledPiCli();
+	if (cli === undefined) return;
+	assert.equal(path.basename(cli), "cli.js");
+	assert.ok(fs.existsSync(cli));
+});
 
 test("parseJsonFromText accepts direct, fenced, and embedded objects", () => {
 	assert.deepEqual(parseJsonFromText('{"status":"pass"}'), { status: "pass" });

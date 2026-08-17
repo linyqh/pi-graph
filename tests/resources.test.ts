@@ -27,6 +27,9 @@ test("create-graph skill frontmatter declares name and graph_create routing", as
 	assert.match(match.groups.frontmatter, /graph_create/);
 	assert.match(skill, /four default coding tools: `read`, `bash`, `edit`, and `write`/);
 	assert.match(skill, /read-only graph or parallel child/);
+	assert.match(skill, /Any tool the current Pi session exposes may be named/);
+	assert.match(skill, /Never invent a tool name/);
+	assert.match(skill, /Custom tools count as read-only by default/);
 	assert.match(skill, /Make every subagent `skills` allowlist explicit/);
 	assert.match(skill, /Never invent a Skill name/);
 	assert.match(skill, /Infer the graph's presentation language/);

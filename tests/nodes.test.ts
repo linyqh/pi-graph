@@ -46,7 +46,7 @@ function services(overrides: Partial<GraphExecutionServices> = {}): GraphExecuti
 		async runSubagent() {
 			return { output: "subagent", text: "subagent", meta: { kind: "subagent" } };
 		},
-		async invokeBuiltinTool(request) {
+		async invokeTool(request) {
 			return { output: request.args, text: "tool", meta: { kind: "tool" } };
 		},
 		truncate(value) {
@@ -132,7 +132,7 @@ test("promptNode and subagentNode use distinct execution services", async () => 
 test("toolNode calls the builtin-tool service and derives mutation metadata", async () => {
 	let request: unknown;
 	const executionServices = services({
-		async invokeBuiltinTool(value) {
+		async invokeTool(value) {
 			request = value;
 			return { output: "ok", text: "ok", meta: {} };
 		},

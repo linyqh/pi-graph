@@ -34,7 +34,7 @@ test("research graph exercises tool, prompt, parallel subagents, router, and syn
 			assert.deepEqual(request.skills, []);
 			return output(`${request.agentName} findings`, "subagent");
 		},
-		async invokeBuiltinTool(request) {
+		async invokeTool(request) {
 			toolNames.push(request.tool);
 			return output(["extensions", "graphs"], "tool");
 		},

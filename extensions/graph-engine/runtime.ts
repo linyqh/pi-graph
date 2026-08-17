@@ -256,7 +256,7 @@ async function executeNode(
 	options: GraphRunOptions,
 	observableState: GraphState = state,
 ): Promise<GraphNodeResult> {
-	const executionServices = options.services ?? createGraphExecutionServices(options.extensionContext);
+	const executionServices = options.services ?? createGraphExecutionServices(options.extensionContext, pi);
 	return node.run({
 		pi,
 		graph,

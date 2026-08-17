@@ -44,7 +44,7 @@ test("graph projection exposes subagent initialization and retains it after comp
 			request = next;
 			return { output: "done", text: "done", meta: { kind: "subagent" } };
 		},
-		async invokeBuiltinTool() {
+		async invokeTool() {
 			throw new Error("unexpected tool");
 		},
 		truncate(value) {

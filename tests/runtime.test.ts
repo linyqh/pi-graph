@@ -372,7 +372,7 @@ test("runGraph treats undeclared dynamic targets as runtime control failures", a
 			async runSubagent() {
 				throw new Error("unexpected subagent");
 			},
-			async invokeBuiltinTool() {
+			async invokeTool() {
 				throw new Error("unexpected tool");
 			},
 			truncate(value) {
@@ -408,7 +408,7 @@ test("runGraph treats undeclared dynamic targets as runtime control failures", a
 			async runSubagent() {
 				throw new Error("unexpected subagent");
 			},
-			async invokeBuiltinTool() {
+			async invokeTool() {
 				throw new Error("unexpected tool");
 			},
 			truncate(value) {
@@ -447,7 +447,7 @@ test("runGraph keeps runtime instrumentation failures observational", async () =
 			async runSubagent() {
 				throw new Error("unexpected subagent");
 			},
-			async invokeBuiltinTool() {
+			async invokeTool() {
 				throw new Error("unexpected tool");
 			},
 			truncate(value) {

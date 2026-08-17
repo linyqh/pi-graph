@@ -8,7 +8,7 @@ import {
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 import type {
 	GraphExecutionOutput,
@@ -20,13 +20,19 @@ import type {
 	JsonObject,
 } from "./types.ts";
 import { parseJsonFromText, runPiSubagent } from "./pi-process.ts";
+import { resolveGraphTool } from "./host-bridge.ts";
 import { resolveAssignedSkills } from "./skill-selection.ts";
+import { listAvailableToolNames } from "./tool-selection.ts";
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_OUTPUT_LINES = 2000;
 
 type ToolMap = ReturnType<typeof createToolMap>;
 
+/**
+ * The coding tools the engine can build for itself. Everything else a `tool`
+ * node names is resolved from the session that registered it.
+ */
 function createToolMap(cwd: string) {
 	return {
 		read: createReadTool(cwd),
@@ -142,16 +148,39 @@ function metadataBase(kind: string, extra: JsonObject = {}): JsonObject {
 	};
 }
 
-export function createGraphExecutionServices(context?: ExtensionContext): GraphExecutionServices {
+export function createGraphExecutionServices(context?: ExtensionContext, api?: Pick<ExtensionAPI, "getAllTools">): GraphExecutionServices {
 	const toolsByCwd = new Map<string, ToolMap>();
 
-	function getTools(cwd: string): ToolMap {
+	function getBuiltinTools(cwd: string): ToolMap {
 		let tools = toolsByCwd.get(cwd);
 		if (!tools) {
 			tools = createToolMap(cwd);
 			toolsByCwd.set(cwd, tools);
 		}
 		return tools;
+	}
+
+	/**
+	 * Built-in coding tools first, then whatever the host resolver can hand
+	 * back for a tool the session registered. Without a resolver a `tool` node
+	 * cannot execute a custom tool in-process, so say so precisely rather than
+	 * failing as "unknown tool".
+	 */
+	function getTool(request: GraphToolRequest): ToolDefinition {
+		const builtin = (getBuiltinTools(request.cwd) as Record<string, ToolDefinition | undefined>)[request.tool];
+		if (builtin) return builtin;
+
+		const resolved = resolveGraphTool(request.tool, context);
+		if (resolved) return resolved;
+
+		const available = listAvailableToolNames(api);
+		if (available.includes(request.tool)) {
+			throw new Error(
+				`Tool ${request.tool} is registered in this Pi session but no executor is reachable from the graph engine. `
+					+ "Run it from a subagent node, or have the host install a graph tool resolver.",
+			);
+		}
+		throw new Error(`Unsupported graph tool: ${request.tool}. Available: ${available.join(", ") || "none"}.`);
 	}
 
 	return {
@@ -255,9 +284,8 @@ export function createGraphExecutionServices(context?: ExtensionContext): GraphE
 			}
 		},
 
-		async invokeBuiltinTool(request) {
-			const tool = getTools(request.cwd)[request.tool];
-			if (!tool) throw new Error(`Unsupported graph tool: ${request.tool}`);
+		async invokeTool(request) {
+			const tool = getTool(request);
 
 			const prepared = typeof tool.prepareArguments === "function" ? tool.prepareArguments(request.args) : request.args;
 			const validator = Compile(tool.parameters);
@@ -275,6 +303,7 @@ export function createGraphExecutionServices(context?: ExtensionContext): GraphE
 					prepared as never,
 					request.signal,
 					undefined,
+					context as ExtensionContext,
 				);
 				if ((result as { isError?: boolean }).isError) {
 					const text = textFromContent(result.content);
@@ -308,6 +337,7 @@ export function servicesFromContext(ctx: unknown): GraphExecutionServices {
 	const holder = ctx as {
 		services?: GraphExecutionServices;
 		extensionContext?: ExtensionContext;
+		pi?: ExtensionAPI;
 	};
-	return holder.services ?? createGraphExecutionServices(holder.extensionContext);
+	return holder.services ?? createGraphExecutionServices(holder.extensionContext, holder.pi);
 }

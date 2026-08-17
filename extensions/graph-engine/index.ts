@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { graphDefinitions, graphRegistry } from "../../graphs/index.ts";
 import type { GraphCatalog } from "./catalog.ts";
 import { createGraphCatalogStore } from "./catalog.ts";
-import { collectDeclarativeSkillNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
+import { collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
 import { declarativeProjectGraphCompiler, migrateLegacyProjectGraphs, PROJECT_GRAPH_MAX_BYTES, resolveProjectGraphsDirectory } from "./project-graphs.ts";
 import { createProjectGraphRunStore } from "./run-store.ts";
 import { findLastGraphRun, findLatestGraphRuns, interruptOrphanedGraphRuns, isLegacyGraphState, resumeGraph, runGraph } from "./runtime.ts";
 import { truncateText } from "./services.ts";
 import { resolveAssignedSkills } from "./skill-selection.ts";
+import { listAvailableToolNames, resolveAssignedTools } from "./tool-selection.ts";
 import type { GraphCheckpointEntry, GraphRunResult, GraphState } from "./types.ts";
 import { projectGraphRunView } from "./view-projection.ts";
 
@@ -434,6 +435,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 				const spec = parseDeclarativeGraphSpec(params.spec);
 				const skillNames = collectDeclarativeSkillNames(spec);
 				if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames);
+				resolveAssignedTools(listAvailableToolNames(pi), collectDeclarativeToolNames(spec));
 				const catalog = await catalogFor(ctx);
 				if (catalog.graphs[spec.name]) {
 					throw new Error(`Graph already exists in catalog: ${spec.name}`);

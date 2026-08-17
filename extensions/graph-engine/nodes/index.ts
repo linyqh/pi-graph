@@ -3,11 +3,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { GraphControlFlowError } from "../types.ts";
 import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphNodeResult, GraphNodeTransition, GraphState, GraphToolName, JsonObject } from "../types.ts";
 import { servicesFromContext } from "../services.ts";
+import { isMutatingTool } from "../tool-selection.ts";
 
 export type TextTemplate = string | ((state: GraphState) => string);
 export type NextValue = string | ((ctx: GraphNodeContext, output: unknown) => string | undefined);
-
-const MUTATING_TOOLS = new Set<GraphToolName>(["bash", "edit", "write"]);
 
 function renderTemplate(template: TextTemplate, state: GraphState): string {
 	return typeof template === "function" ? template(state) : template;
@@ -108,12 +107,14 @@ export interface SubagentNodeOptions extends PromptNodeOptions {
 	agentName: string;
 	tools: GraphToolName[];
 	skills?: string[];
+	/** Overrides the built-in write-tool heuristic for custom tools. */
+	mutates?: boolean;
 }
 
 export function subagentNode(options: SubagentNodeOptions): GraphNode {
 	assertOutputKey(options.id, options.outputKey);
 	assertDynamicTargets(options.id, options.next, options.targets);
-	const mutatesWorkspace = options.tools.some((tool) => MUTATING_TOOLS.has(tool));
+	const mutatesWorkspace = options.mutates ?? options.tools.some(isMutatingTool);
 	return {
 		id: options.id,
 		type: "subagent",
@@ -181,6 +182,8 @@ export interface ToolNodeOptions {
 	outputKey?: string;
 	next?: NextValue;
 	targets?: string[];
+	/** Overrides the built-in write-tool heuristic for custom tools. */
+	mutates?: boolean;
 	approvalNodeId?: string;
 	failure?: GraphNodeFailurePolicy;
 }
@@ -188,7 +191,7 @@ export interface ToolNodeOptions {
 export function toolNode(options: ToolNodeOptions): GraphNode {
 	assertOutputKey(options.id, options.outputKey);
 	assertDynamicTargets(options.id, options.next, options.targets);
-	const mutatesWorkspace = MUTATING_TOOLS.has(options.tool);
+	const mutatesWorkspace = options.mutates ?? isMutatingTool(options.tool);
 	return {
 		id: options.id,
 		type: "tool",
@@ -207,7 +210,7 @@ export function toolNode(options: ToolNodeOptions): GraphNode {
 			const args = typeof options.args === "function" ? options.args(ctx.state) : options.args;
 			ctx.emit(`Tool node ${options.id}: ${tool}`);
 			const services = servicesFromContext(ctx);
-			const result = await services.invokeBuiltinTool({
+			const result = await services.invokeTool({
 				tool,
 				args,
 				cwd: ctx.cwd,

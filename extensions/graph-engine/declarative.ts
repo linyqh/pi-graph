@@ -3,6 +3,7 @@ import Type from "typebox";
 import Value from "typebox/value";
 import type { RegisteredGraphDefinition } from "./registry.ts";
 import { approvalNode, parallelNode, promptNode, routerNode, subagentNode, toolNode } from "./nodes/index.ts";
+import { isMutatingTool, MAX_SUBAGENT_TOOLS, TOOL_NAME_PATTERN } from "./tool-selection.ts";
 import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphNodeResult, GraphState, GraphToolName, JsonObject } from "./types.ts";
 import { assertValidGraph } from "./validation.ts";
 
@@ -11,12 +12,15 @@ const NODE_ID_PATTERN = "^[a-z][a-z0-9_]{0,63}$";
 const SKILL_NAME_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
 const MAX_NODE_COUNT = 64;
 const MAX_PROMPT_TEMPLATE_BYTES = 32 * 1024;
-const SUBAGENT_BASE_TOOLS = ["read", "bash", "edit", "write"] as const;
-const ADDITIONAL_SUBAGENT_TOOLS = ["grep", "find", "ls"] as const;
-const SAFE_TOOLS = [...SUBAGENT_BASE_TOOLS, ...ADDITIONAL_SUBAGENT_TOOLS] as const;
-const MUTATING_TOOLS = new Set<GraphToolName>(["bash", "edit", "write"]);
 const READ_ONLY_PARALLEL_CHILD_TYPES = new Set(["prompt", "subagent", "tool"]);
 const BLOCKED_PATH_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+
+const ToolNameSchema = Type.String({ pattern: TOOL_NAME_PATTERN, maxLength: 64 });
+const MutatesFieldSchema = {
+	mutates: Type.Optional(Type.Boolean({
+		description: "Set true when a tool outside Pi's built-in bash/edit/write changes the workspace. Mutating nodes are barred from read-only graphs and parallel children, and require an approval node under approval-required policy.",
+	})),
+};
 
 const ScalarSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]);
 const StringTemplateSchema = Type.String();
@@ -70,9 +74,10 @@ const SubagentNodeSchema = Type.Object({
 	type: Type.Literal("subagent"),
 	...PromptFieldsSchema,
 	agentName: Type.String({ minLength: 1 }),
-	tools: Type.Array(Type.Union(SAFE_TOOLS.map((tool) => Type.Literal(tool))), {
+	tools: Type.Array(ToolNameSchema, {
 		uniqueItems: true,
-		description: "Explicit Pi tool allowlist. Prefer read,bash,edit,write as the baseline for non-read-only subagents; add grep,find,ls when the task needs them. Read-only graphs and parallel children must omit bash,edit,write.",
+		maxItems: MAX_SUBAGENT_TOOLS,
+		description: "Explicit allowlist of tool names the current Pi session exposes. Built-in coding tools are read,bash,edit,write,grep,find,ls; any other registered tool (from an installed package or extension) may be named here too. Read-only graphs and parallel children must omit bash,edit,write and any tool the node marks as mutating.",
 	}),
 	skills: Type.Optional(Type.Array(Type.String({
 		pattern: SKILL_NAME_PATTERN,
@@ -82,6 +87,7 @@ const SubagentNodeSchema = Type.Object({
 		maxItems: 16,
 		description: "Explicit allowlist of Skill names currently exposed by Pi in <available_skills>. Use an empty array when no Skill matches. Assigned skills require the read tool.",
 	})),
+	...MutatesFieldSchema,
 	...ApprovalReferenceSchema,
 	...FailurePolicyFieldSchema,
 }, { additionalProperties: false });
@@ -89,9 +95,10 @@ const SubagentNodeSchema = Type.Object({
 const ToolNodeSchema = Type.Object({
 	...BaseNodeSchema,
 	type: Type.Literal("tool"),
-	tool: Type.Union(SAFE_TOOLS.map((tool) => Type.Literal(tool))),
+	tool: ToolNameSchema,
 	args: Type.Record(Type.String(), Type.Any()),
 	outputKey: Type.Optional(DataKeySchema),
+	...MutatesFieldSchema,
 	...ApprovalReferenceSchema,
 	...FailurePolicyFieldSchema,
 }, { additionalProperties: false });
@@ -176,7 +183,7 @@ export const DeclarativeGraphSpecSchema = Type.Object({
 	nodes: Type.Array(DeclarativeGraphNodeSchema, { minItems: 1, maxItems: MAX_NODE_COUNT }),
 }, { additionalProperties: false });
 
-export type DeclarativeToolName = typeof SAFE_TOOLS[number];
+export type DeclarativeToolName = GraphToolName;
 export type DeclarativeScalar = string | number | boolean | null;
 export type DeclarativeTemplate = string;
 export type DeclarativeNodeFailurePolicy = GraphNodeFailurePolicy;
@@ -206,6 +213,7 @@ export type DeclarativeSubagentNode = DeclarativePromptLikeNode & {
 	agentName: string;
 	tools: DeclarativeToolName[];
 	skills?: string[];
+	mutates?: boolean;
 	approvalNodeId?: string;
 };
 export type DeclarativeToolNode = {
@@ -216,6 +224,7 @@ export type DeclarativeToolNode = {
 	args: JsonObject;
 	outputKey?: string;
 	next?: string;
+	mutates?: boolean;
 	approvalNodeId?: string;
 	failure?: DeclarativeNodeFailurePolicy;
 };
@@ -395,8 +404,15 @@ function allNodes(spec: DeclarativeGraphSpec): DeclarativeGraphNode[] {
 	return nodes;
 }
 
+/**
+ * A node mutates when it uses one of Pi's built-in write tools, or when it
+ * declares that a custom tool does. The engine cannot tell what a registered
+ * tool does, so custom tools are read-only until a node says otherwise.
+ */
 function nodeMutates(node: DeclarativeGraphNode): boolean {
-	return node.type === "tool" ? MUTATING_TOOLS.has(node.tool as GraphToolName) : node.type === "subagent" && node.tools.some((tool) => MUTATING_TOOLS.has(tool as GraphToolName));
+	if (node.type !== "tool" && node.type !== "subagent") return false;
+	if (node.mutates === true) return true;
+	return node.type === "tool" ? isMutatingTool(node.tool) : node.tools.some(isMutatingTool);
 }
 
 function nodeApprovalNodeId(node: DeclarativeGraphNode): string | undefined {
@@ -637,8 +653,9 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 			id: node.id,
 			label: node.label,
 			agentName: node.agentName,
-			tools: [...node.tools] as GraphToolName[],
+			tools: [...node.tools],
 			skills: [...(node.skills ?? [])],
+			mutates: nodeMutates(node),
 			provider: node.provider,
 			model: node.model,
 			systemPrompt: node.systemPrompt ? compileTextTemplate(node.systemPrompt) : undefined,
@@ -654,10 +671,11 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 		return toolNode({
 			id: node.id,
 			label: node.label,
-			tool: node.tool as GraphToolName,
+			tool: node.tool,
 			args: compileToolArgs(node.args),
 			outputKey: node.outputKey,
 			next: node.next,
+			mutates: nodeMutates(node),
 			approvalNodeId: node.approvalNodeId,
 			failure: node.failure,
 		});
@@ -841,12 +859,27 @@ export function collectDeclarativeSkillNames(value: unknown): string[] {
 	return [...new Set(allNodes(spec).flatMap((node) => node.type === "subagent" ? node.skills ?? [] : []))].sort();
 }
 
+/** Every tool name a graph asks for, across subagent allowlists and tool nodes. */
+export function collectDeclarativeToolNames(value: unknown): string[] {
+	const spec = parseDeclarativeGraphSpec(value);
+	return [...new Set(allNodes(spec).flatMap((node) => {
+		if (node.type === "subagent") return node.tools;
+		return node.type === "tool" ? [node.tool] : [];
+	}))].sort();
+}
+
 export function renderDeclarativeGraphSummary(value: unknown): string {
 	const spec = parseDeclarativeGraphSpec(value);
 	const serialization = serializeDeclarativeGraphSpec(spec);
 	const nodes = allNodes(spec);
 	const mutating = nodes.filter(nodeMutates);
-	const mutatingTools = [...new Set(mutating.flatMap((node) => node.type === "tool" ? [node.tool] : node.type === "subagent" ? node.tools.filter((tool) => MUTATING_TOOLS.has(tool as GraphToolName)) : []))].sort();
+	// A node that declared `mutates` names no specific write tool, so the whole
+	// allowlist is what the approver has to weigh.
+	const mutatingTools = [...new Set(mutating.flatMap((node) => {
+		if (node.type === "tool") return [node.tool];
+		if (node.type !== "subagent") return [];
+		return node.mutates === true ? node.tools : node.tools.filter(isMutatingTool);
+	}))].sort();
 	const subagentTools = nodes
 		.filter((node): node is DeclarativeSubagentNode => node.type === "subagent")
 		.map((node) => `${node.id}:[${node.tools.join(",")}]`);

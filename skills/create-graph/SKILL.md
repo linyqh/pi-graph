@@ -47,11 +47,13 @@ Read `references/graph-spec.md` before asking questions, drafting a graph, or ca
    - Apply the Language Contract to all human-readable fields and keep machine identifiers separate from display text.
    - Keep node ids lower snake_case.
    - Keep the graph name kebab-case and aligned with `.agent-graph/graphs/<kebab-name>.json`.
-   - Make subagent `tools` explicit. For a non-read-only subagent, start with Pi's four default coding tools: `read`, `bash`, `edit`, and `write`; add `grep`, `find`, or `ls` only when its task needs them.
+   - Make subagent `tools` explicit. Any tool the current Pi session exposes may be named — the built-in coding tools plus whatever installed packages and extensions register. For a non-read-only subagent, start with Pi's four default coding tools: `read`, `bash`, `edit`, and `write`; add `grep`, `find`, or `ls` only when its task needs them, and add a custom tool only when that node's task actually calls for it.
    - For a read-only graph or parallel child, keep only the useful read-only tools (`read`, plus `grep`, `find`, or `ls` as needed); never add `bash`, `edit`, or `write` merely to satisfy the default baseline.
+   - Never invent a tool name. Use only names you can see in your own tool list; `graph_create` verifies every one against the live session and fails with the available names when one is missing.
+   - Custom tools count as read-only by default. Set `"mutates": true` on the node when a custom tool changes the workspace, so it obeys the same read-only, parallel, and approval rules as `bash`/`edit`/`write`.
    - Make every subagent `skills` allowlist explicit. Review the current Pi `<available_skills>` names and descriptions, assign only the smallest set that directly matches that node's task, and use `[]` when none match. Never invent a Skill name.
    - Any subagent with assigned Skills must include `read`, because it must load each selected `SKILL.md` before acting.
-   - Use `mutationPolicy: "mutating"` when a graph includes `bash`, `edit`, or `write`.
+   - Use `mutationPolicy: "mutating"` when a graph includes `bash`, `edit`, `write`, or any node marked `"mutates": true`.
    - Add `approvalNodeId` only when the user explicitly wants that node gated by approval.
    - Keep every parallel child read-only.
    - Use router equality cases only.

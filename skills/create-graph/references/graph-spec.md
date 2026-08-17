@@ -15,12 +15,13 @@ Use this reference when creating a graph through the `create-graph` skill. The u
 - Define `nodes` as an array. Every node must include an explicit `id`.
 - Define only six node types: `prompt`, `subagent`, `tool`, `approval`, `router`, and `parallel`.
 - Omit compiler-derived fields: `capabilities`, `transitions`, and `approvalBindings`.
-- Treat `bash`, `edit`, and `write` as mutating tools. Use `mutationPolicy: "mutating"` to run them in a trusted project without mandatory approval.
+- Treat `bash`, `edit`, and `write` as mutating tools, along with any node that declares `"mutates": true`. Use `mutationPolicy: "mutating"` to run them in a trusted project without mandatory approval.
 - Set `approvalNodeId` only when the workflow intentionally requires approval before a specific mutating node.
-- Keep `parallel` children read-only. Parallel children must not use `bash`, `edit`, or `write`.
+- Keep `parallel` children read-only. Parallel children must not use `bash`, `edit`, `write`, or a tool marked `"mutates": true`.
 - Allow only `prompt`, `subagent`, and `tool` children inside `parallel`. Do not nest `parallel`, `router`, or `approval` nodes inside `parallel`.
-- Declare subagent tools explicitly. For non-read-only subagents, prefer Pi's default coding baseline `['read', 'bash', 'edit', 'write']`, then add `grep`, `find`, or `ls` only when the task needs them.
-- The default coding baseline is a creation preference, not an automatic permission escalation. Read-only graphs and parallel children must omit `bash`, `edit`, and `write`; give them `read` plus only the read-only search tools they need.
+- Declare subagent tools explicitly. Any tool the current Pi session registers is allowed, not just the built-in coding tools. For non-read-only subagents, prefer Pi's default coding baseline `['read', 'bash', 'edit', 'write']`, then add `grep`, `find`, `ls`, or the custom tools the task actually needs.
+- Never invent a tool name. `graph_create` validates every name against the live session and fails with the available list when one is missing.
+- The default coding baseline is a creation preference, not an automatic permission escalation. Read-only graphs and parallel children must omit `bash`, `edit`, and `write`; give them `read` plus only the read-only search tools and read-only custom tools they need.
 - Declare every subagent's `skills` explicitly by Skill name. Select only names present in the current Pi `<available_skills>` list whose descriptions directly match the node task; use `[]` when none match and never invent names.
 - A subagent with one or more assigned Skills must include `read`. At runtime the graph engine disables automatic Skill discovery and loads only the selected Skills.
 - Use router equality cases only. Do not use arbitrary expressions or model-generated routing code.
@@ -128,8 +129,9 @@ Use `subagent` nodes for isolated Pi child agents. Tools must be explicit.
 | `id` | Yes | string | Node id. |
 | `type` | Yes | string | Must be `subagent`. |
 | `agentName` | Yes | string | Child agent name. Use lower snake_case. |
-| `tools` | Yes | string[] | Explicit allowlist. Prefer `read`, `bash`, `edit`, `write` for non-read-only subagents, then add `grep`, `find`, or `ls` as needed. |
+| `tools` | Yes | string[] | Explicit allowlist of tool names the current Pi session exposes. Prefer `read`, `bash`, `edit`, `write` for non-read-only subagents, then add `grep`, `find`, `ls`, or custom tools as needed. |
 | `skills` | No | string[] | Explicit allowlist of current Pi Skill names. New graphs should always include it; use `[]` when no available Skill matches. Omission is accepted only for backward compatibility and behaves as `[]`. |
+| `mutates` | No | boolean | Set true when one of the assigned custom tools changes the workspace. Custom tools are read-only by default; `bash`, `edit`, and `write` are detected without it. |
 | `systemPrompt` | No | string | System instruction template. |
 | `prompt` | Yes | string | User prompt template. |
 | `parseJson` | No | boolean | Parse child output as JSON. |
@@ -143,7 +145,8 @@ Use the following allocation policy:
 
 - Implementation-capable subagent: begin with `["read", "bash", "edit", "write"]` so it retains Pi's normal coding capabilities.
 - Add `grep`, `find`, and `ls` only when repository search or navigation materially helps that node.
-- Read-only or parallel subagent: use `["read"]` as the baseline and add only `grep`, `find`, or `ls` as needed. It cannot receive `bash`, `edit`, or `write`.
+- Add a custom tool (one registered by an installed package or extension, such as a data-query tool) only when that node's task needs it. Check your own tool list for the exact name.
+- Read-only or parallel subagent: use `["read"]` as the baseline and add only `grep`, `find`, `ls`, or read-only custom tools as needed. It cannot receive `bash`, `edit`, or `write`, nor be marked `"mutates": true`.
 
 For Skills, compare the node's responsibility with the names and descriptions in Pi's current `<available_skills>` block. Assign the smallest directly relevant set. Skill names are resolved to their current paths when the graph runs, so Graph JSON remains portable and does not store machine-specific absolute paths. Unknown or unavailable Skill names make creation or execution fail explicitly.
 
@@ -151,16 +154,19 @@ Mutating tools run directly under `mutationPolicy: "mutating"` unless the node e
 
 ## Tool Nodes
 
-Use `tool` nodes for built-in tool calls with deterministic arguments.
+Use `tool` nodes for direct tool calls with deterministic arguments.
+
+Pi's built-in coding tools always work here. Any other registered tool works only when the host has installed a graph tool resolver; without one the node fails at run time with a message saying so. When in doubt, put a custom tool behind a `subagent` node instead — that path never needs a resolver.
 
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
 | `id` | Yes | string | Node id. |
 | `type` | Yes | string | Must be `tool`. |
-| `tool` | Yes | string | One of `read`, `grep`, `find`, `ls`, `bash`, `edit`, or `write`. |
+| `tool` | Yes | string | A tool name the current Pi session exposes. Built-in: `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`. |
 | `args` | Yes | object | Tool arguments. Values may use safe templates. |
 | `outputKey` | No | string | Key under `data` where output is stored. Defaults to the node id. |
 | `next` | No | string | Next node id after successful completion. Omit to finish. |
+| `mutates` | No | boolean | Set true when a custom tool changes the workspace. Custom tools are read-only by default. |
 | `approvalNodeId` | No | string | Optional approval node id. |
 
 Prefer read-only tools for discovery. Avoid `bash` when a narrower read-only tool can answer the same question.

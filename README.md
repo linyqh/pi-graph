@@ -60,7 +60,9 @@ pi install "$PWD"
 
 保存成功后无需 `/reload`，新图会立即出现在 `/graph-list`、`graph_list`、命令补全和 `graph_run` 中。通过 `graph_delete` 删除后目录也会立即刷新。若手工修改或删除 JSON，则需要 `/reload` 重新加载图目录。
 
-创建器为非只读 Subagent 优先保留 Pi 默认的 `read/bash/edit/write` 四个编码工具，再按节点任务追加 `grep/find/ls`。只读图和并行子节点不会为了凑齐默认工具而获得修改权限；它们只分配实际需要的只读工具。最终写入确认会逐个展示 Subagent 的工具与 Skill 白名单。
+Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi 会话注册了哪些工具，图就能声明哪些工具，包括已安装包和扩展提供的自定义工具（例如 `fpa_query`）。`graph_create` 会用 `pi.getAllTools()` 校验，写错或写了不存在的工具名会明确失败并列出可用名称。创建器为非只读 Subagent 优先保留 Pi 默认的 `read/bash/edit/write` 四个编码工具，再按节点任务追加 `grep/find/ls` 或所需的自定义工具。只读图和并行子节点不会为了凑齐默认工具而获得修改权限；它们只分配实际需要的只读工具。最终写入确认会逐个展示 Subagent 的工具与 Skill 白名单。
+
+引擎无法判断自定义工具做了什么，因此它们默认按只读处理——这正是 `fpa_query` 这类查询工具能出现在只读图和并行子节点里的原因。会改动工作区的自定义工具，需要节点显式声明 `"mutates": true`，此后它与 `bash/edit/write` 受同样约束：只读图拒绝、并行子节点拒绝、`approval-required` 策略下必须绑定审批节点。
 
 每个 Subagent 还可通过 `skills` 分配当前 Pi 会话中已经加载的 Skill 名称。创建器根据 `<available_skills>` 的名称和描述选择最小匹配集合；运行时使用 `--no-skills` 隔离默认发现结果，再按名称解析并加载选中的 Skill。未分配时使用空数组，未知或已经不可用的 Skill 会明确失败，不会静默回退到全部 Skill。
 
@@ -187,7 +189,7 @@ pi install "$PWD"
 | --- | --- |
 | `prompt` | 单次纯模型调用，不使用工具；可选 JSON 输出和提供商/模型覆盖。 |
 | `subagent` | 隔离 Pi 子代理；`tools` 是工具白名单，`skills` 是 Skill 名称白名单；空数组分别禁用对应能力。 |
-| `tool` | 直接调用 `read/bash/edit/write/grep/find/ls` 中的一个内置工具。 |
+| `tool` | 直接调用会话中的一个工具。内置的 `read/bash/edit/write/grep/find/ls` 由引擎自行构造；其他已注册工具需要宿主安装工具解析器（见下文），否则请改用 `subagent` 节点。 |
 | `approval` | 使用交互界面确认；拒绝可跳转或结束，没有交互界面时暂停。 |
 | `router` | 从固定 `data` path 读取 JSON 标量，按有序等值 cases 和显式 default 路由。 |
 | `parallel` | 并行执行 1 到 8 个只读提示、子代理或工具子节点，并按子节点 ID 保持顺序汇总。首个失败后停止派发新子节点，并等待已经启动的子节点收敛后再发布父节点失败。 |
@@ -244,7 +246,26 @@ pi install "$PWD"
 
 - `completePrompt`：使用当前 `modelRegistry.complete` 做一次无工具模型调用。
 - `runSubagent`：启动隔离的 `pi --mode json -p --no-session` 工具循环。
-- `invokeBuiltinTool`：直接调用 Pi 的 `read/bash/edit/write/grep/find/ls` 工厂函数。
+- `invokeTool`：直接调用 Pi 的 `read/bash/edit/write/grep/find/ls` 工厂函数；其他工具名交给宿主安装的工具解析器。
+
+### 宿主接入点
+
+`tool` 节点在进程内执行工具定义，但 Pi 的 `ExtensionAPI` 只暴露工具元数据（`getAllTools()`），拿不到执行器——`getToolDefinition()` 在 `AgentSession` 上，扩展永远收不到它。另外 Subagent 是独立 `pi` 子进程，它需要知道宿主用的 agent 目录，否则会去读默认的 `~/.pi/agent`，那里既没有宿主的凭证也没有宿主安装的包。
+
+因此持有会话的宿主（例如 Pi Web）通过 `extensions/graph-engine/host-bridge.ts` 注册这两项：
+
+```ts
+import { registerGraphHostEnvironment, registerGraphToolResolver } from "@viccydev/pi-graph/extensions/graph-engine/host-bridge.ts";
+
+registerGraphToolResolver((name, ctx) => findSessionFor(ctx)?.getToolDefinition(name));
+registerGraphHostEnvironment({ agentDir: sharedAgentDir });
+```
+
+两个注册表都挂在 `globalThis` 的约定符号上（`Symbol.for("pi-graph.tool-resolver")`、`Symbol.for("pi-graph.host-environment")`），而不是模块作用域：宿主的打包器与 Pi 的扩展加载器会各自实例化该模块，模块级单例无法共享。因此宿主也可以完全不导入本包，直接写这两个键。
+
+agent 目录只在派生子进程的 `env` 里生效，不会写进宿主的 `process.env`——多租户宿主在同一个进程里交错处理请求，而 SDK 每次调用都现读这个变量。
+
+未注册解析器时，`tool` 节点仍能跑内置的 7 个编码工具；遇到自定义工具会明确报错并提示改用 `subagent` 节点，而 `subagent` 节点本身不依赖解析器——它通过 `pi --tools` 起子进程，任何已注册工具都能用。
 
 新增内置图时创建 `graphs/<name>.ts`，再把定义加入 `graphs/index.ts` 的定义数组。注册表会先拒绝重名，再生成映射和名称列表。扩展加载及每次执行前都会校验起始节点、节点键和 ID、静态跳转、路由候选目标、可达性、审批引用、并行约束和 `maxSteps`。
 

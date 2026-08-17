@@ -260,7 +260,12 @@ export interface GraphRunProjection {
 	edges: GraphRunProjectionEdge[];
 }
 
-export type GraphToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+/**
+ * Any tool name the running Pi session exposes. Graph specs are validated
+ * against the live tool list rather than against a fixed set — see
+ * `tool-selection.ts`.
+ */
+export type GraphToolName = string;
 
 export interface GraphPromptRequest {
 	prompt: string;
@@ -295,7 +300,7 @@ export interface GraphExecutionOutput {
 export interface GraphExecutionServices {
 	completePrompt(request: GraphPromptRequest): Promise<GraphExecutionOutput>;
 	runSubagent(request: GraphSubagentRequest): Promise<GraphExecutionOutput>;
-	invokeBuiltinTool(request: GraphToolRequest): Promise<GraphExecutionOutput>;
+	invokeTool(request: GraphToolRequest): Promise<GraphExecutionOutput>;
 	truncate(value: unknown): unknown;
 }
 
