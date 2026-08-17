@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-	BUILTIN_GRAPH_TOOLS,
+	DEFAULT_GRAPH_TOOLS,
 	isMutatingTool,
 	listAvailableToolNames,
 	resolveAssignedTools,
@@ -21,12 +21,13 @@ test("available tool names come from the live session, not a fixed list", () => 
 	);
 });
 
-test("available tool names fall back to the built-in coding tools without a session", () => {
-	assert.deepEqual(listAvailableToolNames(), [...BUILTIN_GRAPH_TOOLS]);
-	assert.deepEqual(listAvailableToolNames(toolLister([])), [...BUILTIN_GRAPH_TOOLS]);
+test("available tool names fall back to Pi's own default tool set without a session", () => {
+	assert.deepEqual([...DEFAULT_GRAPH_TOOLS], ["read", "bash", "edit", "write"]);
+	assert.deepEqual(listAvailableToolNames(), [...DEFAULT_GRAPH_TOOLS]);
+	assert.deepEqual(listAvailableToolNames(toolLister([])), [...DEFAULT_GRAPH_TOOLS]);
 	assert.deepEqual(
 		listAvailableToolNames({ getAllTools: () => { throw new Error("session gone"); } } as unknown as Pick<ExtensionAPI, "getAllTools">),
-		[...BUILTIN_GRAPH_TOOLS],
+		[...DEFAULT_GRAPH_TOOLS],
 	);
 });
 

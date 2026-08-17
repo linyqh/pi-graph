@@ -8,11 +8,15 @@ export const TOOL_NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$";
 export const MAX_SUBAGENT_TOOLS = 32;
 
 /**
- * The coding tools the graph engine can construct on its own, without a live
- * session. Every other tool is resolved from the session that is running the
- * graph.
+ * Pi's default active tool set — the same four `AgentSession` starts with when
+ * no `--tools` selection is given.
+ *
+ * This is what the engine assumes when it cannot reach a session (offline graph
+ * compilation, the test suite). Pi's own default mode is the honest floor:
+ * anything beyond it, including `grep`/`find`/`ls`, is something a session opts
+ * into, so a sessionless fallback must not claim it.
  */
-export const BUILTIN_GRAPH_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export const DEFAULT_GRAPH_TOOLS = ["read", "bash", "edit", "write"] as const;
 
 /**
  * Built-in tools that change the workspace. Custom tools are treated as
@@ -22,10 +26,6 @@ export const BUILTIN_GRAPH_TOOLS = ["read", "bash", "edit", "write", "grep", "fi
  */
 export const MUTATING_BUILTIN_TOOLS: ReadonlySet<string> = new Set(["bash", "edit", "write"]);
 
-export function isBuiltinGraphTool(name: string): boolean {
-	return (BUILTIN_GRAPH_TOOLS as readonly string[]).includes(name);
-}
-
 export function isMutatingTool(name: string): boolean {
 	return MUTATING_BUILTIN_TOOLS.has(name);
 }
@@ -33,17 +33,16 @@ export function isMutatingTool(name: string): boolean {
 type ToolLister = Pick<ExtensionAPI, "getAllTools">;
 
 /**
- * Tool names the current Pi session exposes. Falls back to the built-in coding
- * tools when no session is reachable, which is the case for offline graph
- * compilation and for the test suite.
+ * Tool names the current Pi session exposes, falling back to Pi's default tool
+ * set when no session is reachable.
  */
 export function listAvailableToolNames(api?: ToolLister): string[] {
-	if (!api || typeof api.getAllTools !== "function") return [...BUILTIN_GRAPH_TOOLS];
+	if (!api || typeof api.getAllTools !== "function") return [...DEFAULT_GRAPH_TOOLS];
 	try {
 		const names = api.getAllTools().map((tool) => tool.name).filter((name) => typeof name === "string" && name.length > 0);
-		return names.length > 0 ? [...new Set(names)].sort() : [...BUILTIN_GRAPH_TOOLS];
+		return names.length > 0 ? [...new Set(names)].sort() : [...DEFAULT_GRAPH_TOOLS];
 	} catch {
-		return [...BUILTIN_GRAPH_TOOLS];
+		return [...DEFAULT_GRAPH_TOOLS];
 	}
 }
 
