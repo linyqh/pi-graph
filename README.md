@@ -13,6 +13,12 @@
 - Node.js `>=22.19`
 - Pi `@earendil-works/pi-coding-agent ^0.84.1`
 
+从 npm 安装正式版本：
+
+```bash
+pi install npm:@viccydev/pi-graph
+```
+
 在仓库根目录执行：
 
 ```bash
@@ -259,6 +265,18 @@ npm run check
 ```
 
 自动测试使用 Node 22 内置 `node:test`，不需要网络或模型凭据。
+
+## 发布到 npm
+
+发布动作由 GitHub Release 触发。Release 标签必须严格使用 `v<package.json version>`，例如当前 `1.1.0` 对应 `v1.1.0`。工作流会检出该标签、执行 `npm ci`、`npm run check` 和包内容预检，全部通过后发布公开包 `@viccydev/pi-graph`。普通 Release 发布到 `latest`，Prerelease 发布到 `next`。
+
+首次发布前需要完成一次仓库配置：
+
+1. 确认 npm 账号或组织拥有 `@viccydev` scope。
+2. 在 GitHub 仓库的 Actions secrets 中创建 `NPM_TOKEN`。Token 需要允许发布该 scope，并允许 CI 绕过发布时的 2FA。
+3. 更新 `package.json` 版本并提交，然后创建匹配版本的 GitHub Release。
+
+首次发布成功后，建议在 npm 包设置中将 Trusted Publisher 配置为 GitHub Actions：GitHub 用户或组织填写 `linyqh`，仓库填写 `pi-graph`，工作流文件填写 `publish.yml`，并允许 `npm publish`。配置完成并验证后即可删除 `NPM_TOKEN`；工作流会通过短期 OIDC 凭据发布。
 
 Pi 手工冒烟流程：
 

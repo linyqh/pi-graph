@@ -1,8 +1,16 @@
 {
-  "name": "pi-graph",
-  "private": true,
+  "name": "@viccydev/pi-graph",
   "version": "1.1.0",
+  "description": "Graph workflow engine extension, skills, and prompts for the pi coding agent",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linyqh/pi-graph.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "engines": {
     "node": ">=22.19"
   },
