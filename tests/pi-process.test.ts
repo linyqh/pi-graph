@@ -84,6 +84,63 @@ test("subagent execution does not mistake an embedding host script for the Pi CL
 	}
 });
 
+test("subagent execution launches the installed Pi CLI through Electron's Node mode", {
+	skip: process.platform === "win32",
+}, async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-graph-electron-host-test-"));
+	const fakeElectron = path.join(dir, "Electron");
+	const argsFile = path.join(dir, "args.txt");
+	const envFile = path.join(dir, "env.txt");
+	const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
+	assert.ok(execPathDescriptor);
+	const originalPath = process.env.PATH;
+	const originalArgsFile = process.env.PI_GRAPH_TEST_ARGS_FILE;
+	const originalEnvFile = process.env.PI_GRAPH_TEST_ENV_FILE;
+	const electronDescriptor = Object.getOwnPropertyDescriptor(process.versions, "electron");
+	const installedCli = resolveInstalledPiCli();
+	assert.ok(installedCli, "the integration fixture requires the installed Pi CLI peer");
+
+	try {
+		fs.writeFileSync(
+			fakeElectron,
+			`#!/bin/sh\nprintf '%s\\n' "$@" > "$PI_GRAPH_TEST_ARGS_FILE"\nprintf '%s' "$ELECTRON_RUN_AS_NODE" > "$PI_GRAPH_TEST_ENV_FILE"\nprintf '%s\\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stopReason":"stop"}}'\n`,
+			"utf8",
+		);
+		fs.chmodSync(fakeElectron, 0o755);
+
+		Object.defineProperty(process, "execPath", { value: fakeElectron, configurable: true });
+		Object.defineProperty(process.versions, "electron", { value: "43.4.0", configurable: true });
+		process.env.PATH = dir;
+		process.env.PI_GRAPH_TEST_ARGS_FILE = argsFile;
+		process.env.PI_GRAPH_TEST_ENV_FILE = envFile;
+
+		const result = await runPiSubagent({
+			agentName: "probe",
+			prompt: "Return OK.",
+			cwd: dir,
+			tools: [],
+			skills: [],
+		});
+
+		const args = fs.readFileSync(argsFile, "utf8").trim().split("\n");
+		assert.equal(result.finalText, "OK");
+		assert.equal(args[0], installedCli);
+		assert.deepEqual(args.slice(1, 4), ["--mode", "json", "-p"]);
+		assert.equal(fs.readFileSync(envFile, "utf8"), "1");
+	} finally {
+		Object.defineProperty(process, "execPath", execPathDescriptor);
+		if (electronDescriptor) Object.defineProperty(process.versions, "electron", electronDescriptor);
+		else delete (process.versions as Record<string, string | undefined>).electron;
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
+		if (originalArgsFile === undefined) delete process.env.PI_GRAPH_TEST_ARGS_FILE;
+		else process.env.PI_GRAPH_TEST_ARGS_FILE = originalArgsFile;
+		if (originalEnvFile === undefined) delete process.env.PI_GRAPH_TEST_ENV_FILE;
+		else process.env.PI_GRAPH_TEST_ENV_FILE = originalEnvFile;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("truncateText enforces the 50KB and 2000-line limits", () => {
 	const byLines = truncateText(new Array(2100).fill("line").join("\n"));
 	assert.equal(byLines.truncated, true);

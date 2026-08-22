@@ -88,9 +88,27 @@ export function resolveInstalledPiCli(): string | undefined {
 	return undefined;
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+interface PiInvocation {
+	command: string;
+	args: string[];
+	electronRunAsNode?: true;
+}
+
+function getPiInvocation(args: string[]): PiInvocation {
 	const execName = path.basename(process.execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+	if (process.versions.electron) {
+		if (hasPiOnPath()) return { command: "pi", args };
+		const installedCli = resolveInstalledPiCli();
+		if (installedCli) {
+			return {
+				command: process.execPath,
+				args: [installedCli, ...args],
+				electronRunAsNode: true,
+			};
+		}
+		return { command: "pi", args };
+	}
 	if (!isGenericRuntime) return { command: process.execPath, args };
 
 	const currentScript = process.argv[1];
@@ -169,7 +187,10 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 		result.exitCode = await new Promise<number>((resolve) => {
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: options.cwd,
-				env: graphChildProcessEnv(),
+				env: {
+					...graphChildProcessEnv(),
+					...(invocation.electronRunAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+				},
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
