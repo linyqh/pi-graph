@@ -40,6 +40,17 @@ export interface GraphNodeStatus {
 	error?: string;
 	attempts?: number;
 	maxAttempts?: number;
+	/**
+	 * Why the model behind a prompt or subagent node stopped, and how much it
+	 * wrote getting there.
+	 *
+	 * A node that ran out of output budget is failed outright, so these exist for
+	 * the case just short of that: a node quietly spending most of its budget is
+	 * the one about to break, and without a number on it that is invisible until
+	 * it does.
+	 */
+	stopReason?: string;
+	outputTokens?: number;
 	subagent?: GraphSubagentExecution;
 }
 
@@ -222,6 +233,8 @@ export interface GraphRunProjectionNode {
 	error?: string;
 	attempts?: number;
 	maxAttempts?: number;
+	stopReason?: string;
+	outputTokens?: number;
 	capabilities?: GraphNodeCapabilities;
 	subagent?: GraphSubagentExecution;
 }

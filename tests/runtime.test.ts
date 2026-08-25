@@ -1031,3 +1031,27 @@ test("session-start recovery marks orphaned running snapshots interrupted", () =
 	assert.equal(interrupted[0].nodes.start.status, "interrupted");
 	assert.equal((persisted[0].data as { state: GraphState }).state.status, "interrupted");
 });
+
+test("a completed node carries the stop reason and output size its meta reported", async () => {
+	const graph = graphWith({
+		start: readOnlyNode("start", async () => ({
+			data: { startMeta: { stopReason: "stop", usage: { output: 17237 } } },
+			done: true,
+		})),
+	});
+	const result = await runGraph(fakePi(), graph, { goal: "goal", cwd: "/workspace" });
+
+	assert.equal(result.state.nodes.start.stopReason, "stop");
+	assert.equal(result.state.nodes.start.outputTokens, 17237);
+	assert.equal(result.projection.nodes[0].outputTokens, 17237);
+});
+
+test("node telemetry is absent rather than invented when a node reports none", async () => {
+	const graph = graphWith({
+		start: readOnlyNode("start", async () => ({ data: { startMeta: { kind: "tool" } }, done: true })),
+	});
+	const result = await runGraph(fakePi(), graph, { goal: "goal", cwd: "/workspace" });
+
+	assert.equal(result.state.nodes.start.stopReason, undefined);
+	assert.equal(result.state.nodes.start.outputTokens, undefined);
+});

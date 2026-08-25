@@ -207,6 +207,8 @@ export function projectGraphRunView(graph: GraphDefinition, state: GraphState): 
 			error: boundedText(runtime.error, 256),
 			attempts: runtime.attempts,
 			maxAttempts: runtime.maxAttempts,
+			stopReason: boundedText(runtime.stopReason, 64),
+			outputTokens: runtime.outputTokens,
 			capabilities: node.capabilities ? { ...node.capabilities } : undefined,
 			subagent: runtime.subagent ? {
 				...runtime.subagent,

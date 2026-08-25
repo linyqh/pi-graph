@@ -7,6 +7,7 @@ import type {
 	GraphFailure,
 	GraphNode,
 	GraphNodeResult,
+	GraphNodeStatus,
 	GraphRunOptions,
 	GraphRunResult,
 	GraphRuntimeServices,
@@ -245,6 +246,21 @@ function errorMessage(options: GraphRunOptions, error: unknown): string {
 function exposeFailure(state: GraphState, failure: GraphFailure): void {
 	state.lastFailure = copyJson(failure);
 	state.data.__graphError = copyJson(failure);
+}
+
+/**
+ * Lift the stop reason and output size a node's meta already carries up onto the
+ * node's own status, where a reader looking at the run can see them without
+ * knowing that `<id>Meta` exists.
+ */
+function executionTelemetry(node: GraphNode, data: JsonObject | undefined): Pick<GraphNodeStatus, "stopReason" | "outputTokens"> {
+	const meta = data?.[`${node.id}Meta`];
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return {};
+	const source = meta as { stopReason?: unknown; usage?: { output?: unknown } };
+	const stopReason = typeof source.stopReason === "string" ? source.stopReason : undefined;
+	const output = source.usage?.output;
+	const outputTokens = typeof output === "number" && Number.isFinite(output) ? output : undefined;
+	return { ...(stopReason ? { stopReason } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) };
 }
 
 async function executeNode(
@@ -633,7 +649,13 @@ async function executeState(
 
 			const completed = runtimeNow(services);
 			let nextNode: string | undefined;
-			state.nodes[node.id] = { ...state.nodes[node.id], status: "completed", startedAt: state.nodes[node.id].startedAt, completedAt: completed };
+			state.nodes[node.id] = {
+				...state.nodes[node.id],
+				status: "completed",
+				startedAt: state.nodes[node.id].startedAt,
+				completedAt: completed,
+				...executionTelemetry(node, nodeResult.data),
+			};
 			extractApproval(state, node, nodeResult, completed);
 			state.history.push(makeEvent(services, node.id, "success", { message: nodeResult.summary }));
 			state.updatedAt = completed;
