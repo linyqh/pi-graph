@@ -85,11 +85,13 @@ function summarizeState(state: GraphState): string {
 }
 
 function resultFor(graph: GraphDefinition, state: GraphState): GraphRunResult {
+	const copiedState = copyJson(state);
+	const resultState: GraphState = { ...copiedState, context: validateGraphRunContext(copiedState.context) };
 	return {
 		summary: summarizeState(state),
 		status: state.status,
 		output: state.finalOutput === undefined ? undefined : copyJson(state.finalOutput),
-		state: copyJson(state),
+		state: resultState,
 		projection: projectGraphRunView(graph, state),
 	};
 }
@@ -353,6 +355,25 @@ function resetNodeTreeForResume(state: GraphState, node: GraphNode): void {
 	for (const child of node.children ?? []) resetNodeTreeForResume(state, child);
 }
 
+const GRAPH_CONTEXT_KEY_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const BLOCKED_CONTEXT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+export function validateGraphRunContext(value: unknown): Readonly<Record<string, string>> {
+	if (value === undefined) return Object.freeze({});
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new GraphControlFlowError("Graph context must be an object.");
+	const entries = Object.entries(value);
+	if (entries.length > 16) throw new GraphControlFlowError("Graph context may contain at most 16 entries.");
+	const result: Record<string, string> = {};
+	for (const [key, item] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+		if (!GRAPH_CONTEXT_KEY_RE.test(key) || BLOCKED_CONTEXT_KEYS.has(key)) throw new GraphControlFlowError(`Graph context key is unsafe: ${key}`);
+		if (typeof item !== "string" || Buffer.byteLength(item, "utf8") > 256) {
+			throw new GraphControlFlowError(`Graph context value for ${key} must be a string of at most 256 UTF-8 bytes.`);
+		}
+		result[key] = item;
+	}
+	return Object.freeze(result);
+}
+
 function createInitialState(graph: GraphDefinition, options: GraphRunOptions, services: GraphRuntimeServices): GraphState {
 	const startedAt = runtimeNow(services);
 	const executionServices = options.services ?? createGraphExecutionServices(options.extensionContext);
@@ -370,6 +391,7 @@ function createInitialState(graph: GraphDefinition, options: GraphRunOptions, se
 		graphSourcePath: graph.sourcePath,
 		goal,
 		cwd: options.cwd,
+		context: validateGraphRunContext(options.context),
 		status: "running",
 		currentNode: graph.start,
 		data: { goal, ...input },
@@ -471,7 +493,11 @@ async function prepareResumeState(
 		}
 	}
 
-	const state = copyJson(checkpoint);
+	const checkpointContext = validateGraphRunContext(checkpoint.context);
+	if (options.context && JSON.stringify(validateGraphRunContext(options.context)) !== JSON.stringify(checkpointContext)) {
+		throw new Error(`Cannot resume graph ${graph.name}: immutable context does not match the checkpoint.`);
+	}
+	const state: GraphState = { ...copyJson(checkpoint), context: checkpointContext };
 	for (const { node: graphNode } of flattenGraphNodes(graph)) {
 		state.nodes[graphNode.id] ??= { status: "pending" };
 	}
@@ -536,7 +562,10 @@ async function executeNodeWithPolicy(
 		);
 
 		try {
-			return { kind: "success", result: await executeNode(pi, services, graph, state, node, options) };
+			const immutableContext = state.context;
+			const result = await executeNode(pi, services, graph, state, node, options);
+			if (state.context !== immutableContext) throw new GraphControlFlowError("Graph nodes cannot replace immutable run context.");
+			return { kind: "success", result };
 		} catch (error) {
 			if (isAbortError(error, options.signal)) throw error;
 			if (error instanceof GraphControlFlowError) throw error;

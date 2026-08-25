@@ -101,6 +101,44 @@ test("runGraph completes, captures failures, and enforces maxSteps", async () =>
 	assert.match(loopResult.state.error ?? "", /maxSteps \(2\)/);
 });
 
+test("runGraph keeps bounded immutable context separate from node data and projects it", async () => {
+	const graph = graphWith({
+		start: readOnlyNode("start", async (ctx) => {
+			assert.deepEqual(ctx.state.context, { scope_id: "company", cycle_id: "2026-08" });
+			return { data: { context: { scope_id: "spoofed" } }, done: true };
+		}),
+	});
+	const entries: GraphCheckpointEntry[] = [];
+	const result = await runGraph(fakePi(entries), graph, {
+		goal: "goal",
+		cwd: "/context",
+		context: { scope_id: "company", cycle_id: "2026-08" },
+	});
+
+	assert.deepEqual(result.state.context, { scope_id: "company", cycle_id: "2026-08" });
+	assert.deepEqual(Object.keys(result.state.context ?? {}), ["cycle_id", "scope_id"]);
+	assert.equal(Object.isFrozen(result.state.context), true);
+	assert.deepEqual(result.projection.context, { scope_id: "company", cycle_id: "2026-08" });
+	assert.deepEqual((entries.at(-1)?.data as { state: GraphState }).state.context, result.state.context);
+	await assert.rejects(
+		runGraph(fakePi(), graph, { goal: "goal", cwd: "/bad-context", context: { constructor: "unsafe" } }),
+		/context key/i,
+	);
+	await assert.rejects(
+		runGraph(fakePi(), graph, { goal: "goal", cwd: "/large-context", context: { scope_id: "x".repeat(257) } }),
+		/context value/i,
+	);
+	const replacing = graphWith({
+		start: readOnlyNode("start", async (ctx) => {
+			(ctx.state as { context?: Record<string, string> }).context = { scope_id: "spoofed" };
+			return { done: true };
+		}),
+	});
+	const replaced = await runGraph(fakePi(), replacing, { goal: "goal", cwd: "/replace-context", context: { scope_id: "company" } });
+	assert.equal(replaced.status, "failed");
+	assert.match(replaced.state.error ?? "", /cannot replace immutable run context/i);
+});
+
 test("runGraph retries declared read-only node failures within maxSteps", async () => {
 	let attempts = 0;
 	const start = readOnlyNode("start", async () => {

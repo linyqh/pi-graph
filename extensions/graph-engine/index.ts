@@ -576,6 +576,11 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 			graph: graphNameParameter(),
 			goal: Type.String({ description: "Goal for the graph" }),
 			input: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Optional initial graph state data" })),
+			context: Type.Optional(Type.Record(
+				Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }),
+				Type.String({ maxLength: 256 }),
+				{ description: "Bounded immutable run identity projected to the UI", maxProperties: 16 },
+			)),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			if (params.input && Object.hasOwn(params.input, "__graphError")) {
@@ -596,6 +601,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 				return runGraph(pi, graph, {
 					goal: params.goal,
 					input: params.input,
+					context: params.context,
 					cwd: ctx.cwd,
 					signal,
 					extensionContext: ctx,

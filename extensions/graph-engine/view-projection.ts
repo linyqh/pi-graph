@@ -250,6 +250,7 @@ export function projectGraphRunView(graph: GraphDefinition, state: GraphState): 
 		graphVersion: boundedText(state.graphVersion, 64),
 		description: boundedText(graph.description, 2 * 1024),
 		goal: boundedText(state.goal, 4 * 1024)!,
+		context: state.context ? { ...state.context } : undefined,
 		status: state.status,
 		currentNodeId: state.currentNode,
 		mutationPolicy: graph.mutationPolicy,

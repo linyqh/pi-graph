@@ -457,7 +457,7 @@ test("parseDeclarativeGraphSpec rejects schema and semantic errors", () => {
 			...validSpec(),
 			nodes: [{ id: "bad_template", type: "prompt", prompt: "{{data}}" }],
 		}),
-		/must be goal, cwd, or data dot path/,
+		/must be goal, cwd, data dot path, or context dot path/,
 	);
 	assert.throws(
 		() => parseDeclarativeGraphSpec({

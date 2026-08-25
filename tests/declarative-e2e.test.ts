@@ -106,6 +106,39 @@ test("a generated read-only graph runs router and parallel branches end to end",
 	assert.equal(Object.values(graph.nodes).some((node) => node.capabilities?.mutatesWorkspace), false);
 });
 
+test("declarative templates can read immutable run context without exposing arbitrary input", async () => {
+	const prompts: string[] = [];
+	const graph = compileDeclarativeGraphSpec({
+		schemaVersion: 1,
+		name: "context-template",
+		version: "1.0.0",
+		description: "Verify immutable run context templating.",
+		mutationPolicy: "read-only",
+		start: "summarize",
+		maxSteps: 1,
+		nodes: [{ id: "summarize", type: "prompt", prompt: "Cycle {{context.cycle_id}} for {{context.scope_id}}", outputKey: "finalSummary" }],
+	});
+	const services: GraphExecutionServices = {
+		async completePrompt(request) {
+			prompts.push(request.prompt);
+			return output("done", "prompt");
+		},
+		async runSubagent() { throw new Error("unexpected subagent"); },
+		async invokeTool() { throw new Error("unexpected tool"); },
+		truncate(value) { return value; },
+	};
+	const result = await runGraph(pi(), graph, {
+		goal: "goal",
+		cwd: "/workspace/context-template",
+		input: { private_payload: "not projected" },
+		context: { scope_id: "company", cycle_id: "2026-08" },
+		services,
+	});
+
+	assert.deepEqual(prompts, ["Cycle 2026-08 for company"]);
+	assert.equal("private_payload" in result.projection, false);
+});
+
 test("a generated graph can route an exhausted failure into a repair prompt", async () => {
 	const graph = compileDeclarativeGraphSpec({
 		schemaVersion: 1,

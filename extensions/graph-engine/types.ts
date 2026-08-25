@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type JsonObject = Record<string, unknown>;
+export type GraphRunContext = Readonly<Record<string, string>>;
 export const GRAPH_STATE_SCHEMA_VERSION = 1;
 
 export type GraphStatus = "running" | "paused" | "interrupted" | "completed" | "failed";
@@ -101,6 +102,7 @@ export interface GraphState {
 	graphSourcePath?: string;
 	goal: string;
 	cwd: string;
+	readonly context?: GraphRunContext;
 	status: GraphStatus;
 	currentNode?: string;
 	data: JsonObject;
@@ -258,6 +260,7 @@ export interface GraphRunProjection {
 	graphVersion?: string;
 	description?: string;
 	goal: string;
+	context?: GraphRunContext;
 	status: GraphStatus;
 	currentNodeId?: string;
 	mutationPolicy: GraphMutationPolicy;
@@ -321,6 +324,7 @@ export interface GraphRunOptions {
 	goal: string;
 	cwd: string;
 	input?: JsonObject;
+	context?: GraphRunContext;
 	signal?: AbortSignal;
 	extensionContext?: ExtensionContext;
 	ui?: ExtensionContext["ui"];

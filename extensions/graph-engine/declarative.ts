@@ -348,12 +348,14 @@ function templateReferences(template: string): string[] {
 function validatePathExpression(expression: string, path: string, issues: string[]): void {
 	const parts = expression.split(".");
 	const [root, ...segments] = parts;
-	if (!["goal", "cwd", "data"].includes(root) || (root === "data" ? segments.length === 0 : segments.length > 0) || parts.some((part) => part.length === 0)) {
-		issues.push(issue(path, `template reference "${expression}" must be goal, cwd, or data dot path`));
+	if (!["goal", "cwd", "data", "context"].includes(root)
+		|| (root === "data" ? segments.length === 0 : root === "context" ? segments.length !== 1 : segments.length > 0)
+		|| parts.some((part) => part.length === 0)) {
+		issues.push(issue(path, `template reference "${expression}" must be goal, cwd, data dot path, or context dot path`));
 		return;
 	}
 	for (const segment of segments) {
-		if (!/^[A-Za-z0-9_]+$/.test(segment) || BLOCKED_PATH_SEGMENTS.has(segment)) {
+		if (!/^[A-Za-z0-9_-]+$/.test(segment) || BLOCKED_PATH_SEGMENTS.has(segment)) {
 			issues.push(issue(path, `template reference "${expression}" contains an unsafe path segment`));
 		}
 	}
@@ -589,7 +591,7 @@ export function parseDeclarativeGraphSpec(value: unknown): DeclarativeGraphSpec 
 function readPath(state: GraphState, expression: string): unknown {
 	const parts = expression.split(".");
 	const [root, ...segments] = parts;
-	let current: unknown = root === "goal" ? state.goal : root === "cwd" ? state.cwd : state.data;
+	let current: unknown = root === "goal" ? state.goal : root === "cwd" ? state.cwd : root === "context" ? state.context ?? {} : state.data;
 	for (const segment of segments) {
 		if (BLOCKED_PATH_SEGMENTS.has(segment)) throw new DeclarativeGraphError([issue("template", `unsafe path segment: ${segment}`)]);
 		if (!isRecord(current) || !Object.hasOwn(current, segment)) {
