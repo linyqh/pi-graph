@@ -52,6 +52,5 @@ jobs:
 
       - name: Publish package
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIST_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
         run: npm publish --access public --tag "$NPM_DIST_TAG"
