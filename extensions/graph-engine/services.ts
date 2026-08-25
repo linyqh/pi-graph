@@ -104,6 +104,20 @@ function abortedError(message: string): Error {
 	return error;
 }
 
+/**
+ * A model that stops on `length` was cut off mid-sentence: its last tool call
+ * may never have been emitted, and the text left behind is whatever partial
+ * turn happened to be in flight. Treating that as success is how a node gets
+ * marked completed while the work it was supposed to durably commit never
+ * happened, so the engine fails the node instead and says why.
+ */
+function truncatedError(subject: string): Error {
+	return new Error(
+		`${subject} hit the model output limit and stopped mid-generation, so its work is incomplete. `
+			+ "Split the node into smaller steps, or move the large payload into a file the node writes across turns.",
+	);
+}
+
 function textFromContent(content: unknown): string {
 	if (!Array.isArray(content)) return "";
 	return content
@@ -207,6 +221,9 @@ export function createGraphExecutionServices(context?: ExtensionContext, api?: P
 				if (response.stopReason === "error") {
 					throw new Error(response.errorMessage || "Prompt model stopped with an error.");
 				}
+				if (response.stopReason === "length") {
+					throw truncatedError("Prompt node");
+				}
 				const rawText = textFromContent(response.content);
 				if (!rawText.trim()) throw new Error("Prompt node returned empty output.");
 				const truncated = truncateText(rawText);
@@ -241,6 +258,7 @@ export function createGraphExecutionServices(context?: ExtensionContext, api?: P
 				const result = await runPiSubagent({
 					agentName: request.agentName,
 					sessionId,
+					sessionDir: context?.sessionManager.getSessionDir(),
 					sessionName: `Subagent · ${request.agentName}`,
 					prompt: request.prompt,
 					systemPrompt: request.systemPrompt,
@@ -257,6 +275,9 @@ export function createGraphExecutionServices(context?: ExtensionContext, api?: P
 				}
 				if (result.exitCode !== 0 || result.stopReason === "error") {
 					throw new Error(result.errorMessage || result.stderr || `Subagent ${request.agentName} failed.`);
+				}
+				if (result.stopReason === "length") {
+					throw truncatedError(`Subagent ${request.agentName}`);
 				}
 				if (!result.finalText.trim()) throw new Error(`Subagent ${request.agentName} returned empty output.`);
 

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { buildSubagentSystemPrompt, buildToolSelectionArgs, parseJsonFromText, resolveInstalledPiCli, runPiSubagent } from "../extensions/graph-engine/pi-process.ts";
+import { buildPiPromptArgs, buildSubagentSystemPrompt, buildToolSelectionArgs, parseJsonFromText, resolveInstalledPiCli, runPiSubagent } from "../extensions/graph-engine/pi-process.ts";
 import { truncateText } from "../extensions/graph-engine/services.ts";
 
 test("subagent tool selection passes any session tool name through to the child", () => {
@@ -33,6 +33,23 @@ test("parseJsonFromText rejects empty and malformed output", () => {
 test("subagent tool selection never falls back to pi defaults", () => {
 	assert.deepEqual(buildToolSelectionArgs([]), ["--no-tools"]);
 	assert.deepEqual(buildToolSelectionArgs(["read", "grep"]), ["--tools", "read,grep"]);
+});
+
+test("subagent session persistence uses the host session directory", () => {
+	const args = buildPiPromptArgs({
+		agentName: "reviewer",
+		prompt: "Review",
+		cwd: "/srv/fpa/tenants/acme/workspace/default",
+		sessionDir: "/srv/fpa/tenants/acme/sessions/default",
+		sessionId: "child-session",
+		tools: [],
+		skills: [],
+	});
+	assert.deepEqual(args.slice(0, 7), [
+		"--mode", "json", "-p",
+		"--session-id", "child-session",
+		"--session-dir", "/srv/fpa/tenants/acme/sessions/default",
+	]);
 });
 
 test("subagent prompt requires every assigned Skill to be loaded before acting", () => {

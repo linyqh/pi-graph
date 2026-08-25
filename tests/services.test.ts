@@ -67,6 +67,14 @@ test("completePrompt performs one tool-free model call and normalizes output err
 		aborted.completePrompt({ prompt: "x", cwd: "/workspace" }),
 		(error: Error) => error.name === "AbortError" && /model request cancelled/.test(error.message),
 	);
+	const truncated = createGraphExecutionServices(modelContext(async () => ({
+		...assistant('{"status":"par'),
+		stopReason: "length",
+	})));
+	await assert.rejects(
+		truncated.completePrompt({ prompt: "x", cwd: "/workspace" }),
+		/output limit and stopped mid-generation/,
+	);
 });
 
 test("invokeTool validates and executes all seven supported pi tools", async () => {
@@ -172,4 +180,86 @@ test("runSubagent rejects an assigned Skill that is unavailable before spawning 
 		skills: ["code-review"],
 		cwd: "/workspace",
 	}), /Assigned skills are not available.*code-review/);
+});
+
+test("runSubagent forwards the host SessionManager directory to the child Pi process", {
+	skip: process.platform === "win32",
+}, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-graph-session-dir-"));
+	const bin = join(cwd, "bin");
+	const fakePi = join(bin, "pi");
+	const argsFile = join(cwd, "args.json");
+	const sessionDir = join(cwd, "tenant-sessions");
+	const originalPath = process.env.PATH;
+	const originalArgsFile = process.env.PI_GRAPH_TEST_ARGS_FILE;
+	await mkdir(bin);
+	await writeFile(
+		fakePi,
+		`#!/usr/bin/env node\n`
+			+ `require("node:fs").writeFileSync(process.env.PI_GRAPH_TEST_ARGS_FILE, JSON.stringify(process.argv.slice(2)));\n`
+			+ `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } }));\n`,
+		"utf8",
+	);
+	await chmod(fakePi, 0o700);
+
+	const context = modelContext(async () => assistant("unused"));
+	(context as unknown as { sessionManager: { getSessionDir(): string } }).sessionManager = {
+		getSessionDir: () => sessionDir,
+	};
+	process.env.PATH = `${bin}:${originalPath ?? ""}`;
+	process.env.PI_GRAPH_TEST_ARGS_FILE = argsFile;
+
+	try {
+		const services = createGraphExecutionServices(context);
+		const result = await services.runSubagent({
+			agentName: "reviewer",
+			prompt: "Return OK",
+			tools: [],
+			skills: [],
+			cwd,
+		});
+		assert.equal(result.text, "OK");
+		const args = JSON.parse(await readFile(argsFile, "utf8")) as string[];
+		const sessionDirIndex = args.indexOf("--session-dir");
+		assert.notEqual(sessionDirIndex, -1);
+		assert.equal(args[sessionDirIndex + 1], sessionDir);
+	} finally {
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
+		if (originalArgsFile === undefined) delete process.env.PI_GRAPH_TEST_ARGS_FILE;
+		else process.env.PI_GRAPH_TEST_ARGS_FILE = originalArgsFile;
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runSubagent fails a child that stopped at the output limit", {
+	skip: process.platform === "win32",
+}, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-graph-truncated-"));
+	const bin = join(cwd, "bin");
+	const fakePi = join(bin, "pi");
+	const originalPath = process.env.PATH;
+	await mkdir(bin);
+	// Exits 0 with non-empty text, exactly like the run that silently reported a
+	// frozen artifact it never committed. Only stopReason tells them apart.
+	await writeFile(
+		fakePi,
+		`#!/usr/bin/env node\n`
+			+ `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Let me read the upstream artifacts first." }], stopReason: "length" } }));\n`,
+		"utf8",
+	);
+	await chmod(fakePi, 0o700);
+	process.env.PATH = `${bin}:${originalPath ?? ""}`;
+
+	try {
+		const services = createGraphExecutionServices();
+		await assert.rejects(
+			services.runSubagent({ agentName: "forecast", prompt: "Freeze it", tools: [], skills: [], cwd }),
+			/output limit and stopped mid-generation/,
+		);
+	} finally {
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
+		await rm(cwd, { recursive: true, force: true });
+	}
 });

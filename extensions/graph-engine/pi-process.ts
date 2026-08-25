@@ -17,6 +17,7 @@ export interface PiPromptOptions {
 	tools: string[];
 	skills: AssignedSkill[];
 	sessionId?: string;
+	sessionDir?: string;
 	sessionName?: string;
 	thinkingLevel?: string;
 	signal?: AbortSignal;
@@ -152,6 +153,7 @@ export function buildToolSelectionArgs(tools: string[]): string[] {
 export function buildPiPromptArgs(options: PiPromptOptions): string[] {
 	const args = ["--mode", "json", "-p"];
 	if (options.sessionId) args.push("--session-id", options.sessionId);
+	if (options.sessionDir) args.push("--session-dir", options.sessionDir);
 	if (options.sessionName) args.push("--name", options.sessionName);
 	if (options.provider) args.push("--provider", options.provider);
 	if (options.model) args.push("--model", options.model);
