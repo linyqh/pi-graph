@@ -1,6 +1,6 @@
 {
   "name": "@viccydev/pi-graph",
-  "version": "1.2.2",
+  "version": "1.2.3-oidc.0",
   "description": "Graph workflow engine extension, skills, and prompts for the pi coding agent",
   "type": "module",
   "repository": {
