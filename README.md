@@ -86,6 +86,7 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 - `graph_create` 只负责验证、再次确认和创建新图，不支持覆盖、编辑或删除。
 - `graph_delete` 只删除当前可信项目中已经加载的项目图；删除前展示名称和路径并再次确认。内置图、未知图、无交互界面或用户拒绝时不会删除。
 - `graph_run` 接受动态字符串图名，在执行时查询图目录，并声明为顺序执行。图完成时，终止执行节点的输出会直接进入模型可见的工具正文，并同时保存在 `details.output` 和检查点的 `state.finalOutput` 中；`outputKey` 只决定该值在 `state.data` 中的名称。节点失败时，模型正文改为有效的精简 JSON，包含真实失败节点、错误、`runId` 和安全恢复参数；外层主 Agent 应先诊断并修复可验证的外部原因，再按原样调用返回的 `graph_resume` 参数，不能盲目重试。
+- `graph_run.context` 可携带最多 16 个不可变运行标识，键必须匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`，值必须是最多 256 UTF-8 字节的字符串。Context 独立于可变 `data`，会随检查点持久化并投影到 UI；声明式模板通过 `{{context.<key>}}` 只读访问，恢复时不得替换。
 - `graph_resume` 只供模型恢复当前会话分支、当前工作目录中的精确 `failed` 快照。它要求 `runId` 和预期 `resumeCount`，在执行队列内重新读取最新检查点并做 compare-and-swap 校验，避免重复或过期调用恢复了另一次失败。人工 `/graph-resume` 仍可恢复 `paused/interrupted/failed`。
 
 ## 声明式 JSON DSL
@@ -199,10 +200,11 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 ```text
 {{goal}}
 {{cwd}}
+{{context.cycle_id}}
 {{data.path.to.value}}
 ```
 
-工具参数中的精确占位符保留原 JSON 类型；字符串中的占位符转成文本。路径缺失会让节点明确失败，不会替换成空字符串。DSL 不支持表达式、脚本、`eval`、第三方扩展工具、嵌套并行节点或自定义归并器。
+`context` 是 `graph_run` 提供并随检查点持久化的不可变运行标识；工具参数中的精确占位符保留原 JSON 类型，字符串中的占位符转成文本。路径缺失会让节点明确失败，不会替换成空字符串。DSL 不支持表达式、脚本、`eval`、第三方扩展工具、嵌套并行节点或自定义归并器。
 
 `capabilities`、`transitions` 和 `approvalBindings` 由编译器推导，JSON 不能自行声明。包含 `bash/edit/write` 的工具或子代理使用 `mutationPolicy: "mutating"` 时无需绑定审批节点；需要人工门禁时可显式设置 `approvalNodeId`，旧的 `approval-required` 策略仍要求所有修改节点绑定审批。并行子节点永远不能修改工作区。
 
@@ -289,15 +291,9 @@ npm run check
 
 ## 发布到 npm
 
-发布动作由 GitHub Release 触发。Release 标签必须严格使用 `v<package.json version>`，例如当前 `1.1.0` 对应 `v1.1.0`。工作流会检出该标签、执行 `npm ci`、`npm run check` 和包内容预检，全部通过后发布公开包 `@viccydev/pi-graph`。普通 Release 发布到 `latest`，Prerelease 发布到 `next`。
+发布动作由 GitHub Release 触发。Release 标签必须严格使用 `v<package.json version>`，例如版本 `1.3.0` 对应 `v1.3.0`。工作流会检出该标签、执行 `npm ci`、`npm run check` 和包内容预检，全部通过后发布公开包 `@viccydev/pi-graph`。普通 Release 发布到 `latest`，Prerelease 发布到 `next`。
 
-首次发布前需要完成一次仓库配置：
-
-1. 确认 npm 账号或组织拥有 `@viccydev` scope。
-2. 在 GitHub 仓库的 Actions secrets 中创建 `NPM_TOKEN`。Token 需要允许发布该 scope，并允许 CI 绕过发布时的 2FA。
-3. 更新 `package.json` 版本并提交，然后创建匹配版本的 GitHub Release。
-
-首次发布成功后，建议在 npm 包设置中将 Trusted Publisher 配置为 GitHub Actions：GitHub 用户或组织填写 `linyqh`，仓库填写 `pi-graph`，工作流文件填写 `publish.yml`，并允许 `npm publish`。配置完成并验证后即可删除 `NPM_TOKEN`；工作流会通过短期 OIDC 凭据发布。
+发布认证使用 npm Trusted Publishing / OIDC，不使用长期 npm Token。Trusted Publisher 必须精确配置为 GitHub 用户 `linyqh`、仓库 `pi-graph`、工作流文件 `publish.yml`，Allowed action 为 `npm publish`。工作流必须保留 `permissions.id-token: write`，不得重新加入 `NPM_TOKEN` 或 `NODE_AUTH_TOKEN`。
 
 Pi 手工冒烟流程：
 

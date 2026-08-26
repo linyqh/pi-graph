@@ -25,7 +25,7 @@ Use this reference when creating a graph through the `create-graph` skill. The u
 - Declare every subagent's `skills` explicitly by Skill name. Select only names present in the current Pi `<available_skills>` list whose descriptions directly match the node task; use `[]` when none match and never invent names.
 - A subagent with one or more assigned Skills must include `read`. At runtime the graph engine disables automatic Skill discovery and loads only the selected Skills.
 - Use router equality cases only. Do not use arbitrary expressions or model-generated routing code.
-- Use only safe template variables: `{{goal}}`, `{{cwd}}`, and `{{data.<path>}}`.
+- Use only safe template variables: `{{goal}}`, `{{cwd}}`, `{{context.<key>}}`, and `{{data.<path>}}`.
 - Decide failure behavior explicitly for fallible top-level `prompt`, `subagent`, and `tool` nodes. Use `failure.maxAttempts` only for read-only retries and `failure.onError` for a declared recovery branch.
 
 ## Template Values
@@ -36,9 +36,10 @@ Templates appear in prompt text, system prompts, approval text, and tool args. T
 | --- | --- |
 | `{{goal}}` | The goal passed to `/graph <name> <goal>`. |
 | `{{cwd}}` | The trusted project working directory for the run. |
+| `{{context.<key>}}` | One immutable run identity string supplied to `graph_run.context`. Context accepts at most 16 keys matching `^[A-Za-z][A-Za-z0-9_-]{0,63}$`; each value is at most 256 UTF-8 bytes. It is persisted and cannot be replaced during resume. |
 | `{{data.<path>}}` | Output stored by a previous node, addressed by `outputKey` or node id plus optional nested fields. After a declared error transition, `{{data.__graphError.message}}` contains the latest node failure message. |
 
-Examples: `{{data.findings}}`, `{{data.review.status}}`, `{{data.parallel_findings.lane_a}}`.
+Examples: `{{context.cycle_id}}`, `{{data.findings}}`, `{{data.review.status}}`, `{{data.parallel_findings.lane_a}}`.
 
 Do not use bare `{{data}}`, environment variables, shell expansion, filesystem globs, network URLs, or arbitrary code inside templates. Put safety instructions in prompts instead of relying on template logic.
 
