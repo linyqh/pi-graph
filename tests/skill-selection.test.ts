@@ -35,6 +35,16 @@ test("assigned Skills resolve by requested name and reject unavailable names", (
 	assert.throws(() => resolveAssignedSkills(systemPrompt, ["missing"]), /not available.*missing.*code-review, docs/);
 });
 
+test("Graph can explicitly resolve a registered hidden Skill without exposing it in the system prompt", () => {
+	const hiddenPath = "/tmp/skills/execution-guard/SKILL.md";
+
+	assert.deepEqual(resolveAssignedSkills(systemPrompt, ["execution-guard"], [
+		{ name: "execution-guard", path: hiddenPath },
+	]), [
+		{ name: "execution-guard", path: hiddenPath },
+	]);
+});
+
 test("Skill CLI selection disables discovery and loads only assigned paths", () => {
 	assert.deepEqual(buildSkillSelectionArgs([]), ["--no-skills"]);
 	assert.deepEqual(buildSkillSelectionArgs([

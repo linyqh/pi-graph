@@ -182,6 +182,60 @@ test("runSubagent rejects an assigned Skill that is unavailable before spawning 
 	}), /Assigned skills are not available.*code-review/);
 });
 
+test("runSubagent loads an explicitly registered hidden Skill", {
+	skip: process.platform === "win32",
+}, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-graph-hidden-skill-"));
+	const bin = join(cwd, "bin");
+	const fakePi = join(bin, "pi");
+	const argsFile = join(cwd, "args.json");
+	const hiddenPath = join(cwd, "skills", "execution-guard", "SKILL.md");
+	const originalPath = process.env.PATH;
+	const originalArgsFile = process.env.PI_GRAPH_TEST_ARGS_FILE;
+	await mkdir(bin);
+	await mkdir(join(cwd, "skills", "execution-guard"), { recursive: true });
+	await writeFile(hiddenPath, "---\nname: execution-guard\ndisable-model-invocation: true\n---\n", "utf8");
+	await writeFile(
+		fakePi,
+		`#!/usr/bin/env node\n`
+			+ `require("node:fs").writeFileSync(process.env.PI_GRAPH_TEST_ARGS_FILE, JSON.stringify(process.argv.slice(2)));\n`
+			+ `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } }));\n`,
+		"utf8",
+	);
+	await chmod(fakePi, 0o700);
+	process.env.PATH = `${bin}:${originalPath ?? ""}`;
+	process.env.PI_GRAPH_TEST_ARGS_FILE = argsFile;
+
+	try {
+		const context = modelContext(async () => assistant("unused"));
+		(context as unknown as { sessionManager: { getSessionDir(): string } }).sessionManager = {
+			getSessionDir: () => join(cwd, "sessions"),
+		};
+		const services = createGraphExecutionServices(
+			context,
+			undefined,
+			() => [{ name: "execution-guard", path: hiddenPath }],
+		);
+		await services.runSubagent({
+			agentName: "executor",
+			prompt: "Execute safely",
+			tools: [],
+			skills: ["execution-guard"],
+			cwd,
+		});
+		const args = JSON.parse(await readFile(argsFile, "utf8")) as string[];
+		const skillIndex = args.indexOf("--skill");
+		assert.notEqual(skillIndex, -1);
+		assert.equal(args[skillIndex + 1], hiddenPath);
+	} finally {
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
+		if (originalArgsFile === undefined) delete process.env.PI_GRAPH_TEST_ARGS_FILE;
+		else process.env.PI_GRAPH_TEST_ARGS_FILE = originalArgsFile;
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("runSubagent forwards the host SessionManager directory to the child Pi process", {
 	skip: process.platform === "win32",
 }, async () => {

@@ -21,7 +21,7 @@ import type {
 } from "./types.ts";
 import { parseJsonFromText, runPiSubagent } from "./pi-process.ts";
 import { resolveGraphTool } from "./host-bridge.ts";
-import { resolveAssignedSkills } from "./skill-selection.ts";
+import { resolveAssignedSkills, type AssignedSkill } from "./skill-selection.ts";
 import { listAvailableToolNames } from "./tool-selection.ts";
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
@@ -162,7 +162,11 @@ function metadataBase(kind: string, extra: JsonObject = {}): JsonObject {
 	};
 }
 
-export function createGraphExecutionServices(context?: ExtensionContext, api?: Pick<ExtensionAPI, "getAllTools">): GraphExecutionServices {
+export function createGraphExecutionServices(
+	context?: ExtensionContext,
+	api?: Pick<ExtensionAPI, "getAllTools">,
+	registeredSkills: () => Iterable<AssignedSkill> = () => [],
+): GraphExecutionServices {
 	const toolsByCwd = new Map<string, ToolMap>();
 
 	function getBuiltinTools(cwd: string): ToolMap {
@@ -254,7 +258,7 @@ export function createGraphExecutionServices(context?: ExtensionContext, api?: P
 				const provider = request.provider ?? context?.model?.provider;
 				const model = request.model ?? context?.model?.id;
 				const systemPrompt = context?.getSystemPrompt?.() ?? "";
-				const skills = resolveAssignedSkills(systemPrompt, request.skills);
+				const skills = resolveAssignedSkills(systemPrompt, request.skills, registeredSkills());
 				const result = await runPiSubagent({
 					agentName: request.agentName,
 					sessionId,

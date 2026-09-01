@@ -271,6 +271,7 @@ test("extension registration exposes list, create, delete, run, and resume tools
 		registerTool(value: { name: string; description?: string; executionMode?: string; parameters?: unknown }) {
 			tools.set(value.name, value);
 		},
+		events: { on: () => () => undefined, emit() {} },
 		on() {},
 	} as unknown as ExtensionAPI;
 	graphEngineeringExtension(extensionApi);

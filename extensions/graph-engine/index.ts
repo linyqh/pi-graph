@@ -9,8 +9,14 @@ import { collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeG
 import { declarativeProjectGraphCompiler, migrateLegacyProjectGraphs, PROJECT_GRAPH_MAX_BYTES, resolveProjectGraphsDirectory } from "./project-graphs.ts";
 import { createProjectGraphRunStore } from "./run-store.ts";
 import { findLastGraphRun, findLatestGraphRuns, interruptOrphanedGraphRuns, isLegacyGraphState, resumeGraph, runGraph } from "./runtime.ts";
-import { truncateText } from "./services.ts";
-import { resolveAssignedSkills } from "./skill-selection.ts";
+import { createGraphExecutionServices, truncateText } from "./services.ts";
+import {
+	GRAPH_ASSIGNED_SKILL_REGISTER_CHANNEL,
+	GRAPH_ASSIGNED_SKILL_REQUEST_CHANNEL,
+	parseRegisteredAssignedSkill,
+	resolveAssignedSkills,
+	type AssignedSkill,
+} from "./skill-selection.ts";
 import { listAvailableToolNames, resolveAssignedTools } from "./tool-selection.ts";
 import type { GraphCheckpointEntry, GraphRunResult, GraphState } from "./types.ts";
 import { projectGraphRunView } from "./view-projection.ts";
@@ -262,6 +268,21 @@ async function runQueued<T>(run: () => Promise<T>): Promise<T> {
 }
 
 export default function graphEngineeringExtension(pi: ExtensionAPI) {
+	const registeredSkills: AssignedSkill[] = [];
+	pi.events.on(GRAPH_ASSIGNED_SKILL_REGISTER_CHANNEL, (value) => {
+		const skill = parseRegisteredAssignedSkill(value);
+		if (!skill) return;
+		if (!registeredSkills.some((entry) => entry.name === skill.name && entry.path === skill.path)) {
+			registeredSkills.push(skill);
+		}
+	});
+	const requestRegisteredSkills = () => {
+		registeredSkills.length = 0;
+		pi.events.emit(GRAPH_ASSIGNED_SKILL_REQUEST_CHANNEL, { schemaVersion: 1 });
+	};
+	const servicesFor = (ctx: ExtensionContext) => createGraphExecutionServices(ctx, pi, () => registeredSkills);
+	requestRegisteredSkills();
+
 	const catalogStore = createGraphCatalogStore({
 		builtInDefinitions: graphDefinitions,
 		compiler: declarativeProjectGraphCompiler,
@@ -280,6 +301,10 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		if (!data?.state) return new Text("Graph run checkpoint unavailable.", 0, 0);
 		if (data.state.status === "running") return undefined;
 		return new Text(formatGraphRunEntry(data.state, expanded ?? false, theme, data.summary), 0, 0);
+	});
+
+	pi.on("session_start", () => {
+		requestRegisteredSkills();
 	});
 
 	pi.registerCommand("graph-list", {
@@ -335,6 +360,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 						ui: ctx.hasUI ? ctx.ui : undefined,
 						checkpoints,
 						runStore: ctx.isProjectTrusted() ? createProjectGraphRunStore(ctx.cwd) : undefined,
+						services: servicesFor(ctx),
 					});
 				});
 				ctx.ui.notify(formatStatus(result), result.status === "failed" ? "error" : "info");
@@ -374,6 +400,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 						ui: ctx.hasUI ? ctx.ui : undefined,
 						checkpoints,
 						runStore: ctx.isProjectTrusted() ? createProjectGraphRunStore(ctx.cwd) : undefined,
+						services: servicesFor(ctx),
 					});
 					ctx.ui.notify(formatStatus(result), result.status === "failed" ? "error" : "info");
 				});
@@ -434,7 +461,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 			try {
 				const spec = parseDeclarativeGraphSpec(params.spec);
 				const skillNames = collectDeclarativeSkillNames(spec);
-				if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames);
+				if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames, registeredSkills);
 				resolveAssignedTools(listAvailableToolNames(pi), collectDeclarativeToolNames(spec));
 				const catalog = await catalogFor(ctx);
 				if (catalog.graphs[spec.name]) {
@@ -609,6 +636,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 					onUpdate,
 					checkpoints,
 					runStore: ctx.isProjectTrusted() ? createProjectGraphRunStore(ctx.cwd) : undefined,
+					services: servicesFor(ctx),
 				});
 			});
 
@@ -721,6 +749,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 						onUpdate,
 						checkpoints,
 						runStore: ctx.isProjectTrusted() ? createProjectGraphRunStore(ctx.cwd) : undefined,
+						services: servicesFor(ctx),
 					});
 					return {
 						content: [{ type: "text" as const, text: formatGraphRunModelContent(result) }],

@@ -1,6 +1,25 @@
+import { isAbsolute } from "node:path";
+
 export interface AssignedSkill {
 	name: string;
 	path: string;
+}
+
+export const GRAPH_ASSIGNED_SKILL_REQUEST_CHANNEL = "pi-graph:assigned-skills:request";
+export const GRAPH_ASSIGNED_SKILL_REGISTER_CHANNEL = "pi-graph:assigned-skills:register";
+
+export function parseRegisteredAssignedSkill(value: unknown): AssignedSkill | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const source = value as Record<string, unknown>;
+	if (
+		source.schemaVersion !== 1
+		|| source.disableModelInvocation !== true
+		|| typeof source.name !== "string"
+		|| !source.name.trim()
+		|| typeof source.path !== "string"
+		|| !isAbsolute(source.path)
+	) return undefined;
+	return { name: source.name.trim(), path: source.path };
 }
 
 function decodeXml(value: string): string {
@@ -29,13 +48,25 @@ export function parseAvailableSkills(systemPrompt: string): AssignedSkill[] {
 	return skills;
 }
 
-export function resolveAssignedSkills(systemPrompt: string, names: string[]): AssignedSkill[] {
+export function resolveAssignedSkills(
+	systemPrompt: string,
+	names: string[],
+	registered: Iterable<AssignedSkill> = [],
+): AssignedSkill[] {
 	if (names.length === 0) return [];
 	const available = parseAvailableSkills(systemPrompt);
 	const byName = new Map(available.map((skill) => [skill.name, skill]));
+	for (const skill of registered) {
+		if (!skill.name.trim() || !skill.path.trim()) continue;
+		const existing = byName.get(skill.name);
+		if (existing && existing.path !== skill.path) {
+			throw new Error(`Assigned Skill ${skill.name} has conflicting registered paths.`);
+		}
+		byName.set(skill.name, skill);
+	}
 	const missing = names.filter((name) => !byName.has(name));
 	if (missing.length > 0) {
-		const availableNames = available.map((skill) => skill.name).sort();
+		const availableNames = [...byName.keys()].sort();
 		throw new Error(
 			`Assigned skills are not available in the current Pi session: ${missing.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
 		);

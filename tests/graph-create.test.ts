@@ -36,6 +36,7 @@ function registerExtension() {
 		registerTool(tool: CapturedTool) {
 			tools.set(tool.name, tool);
 		},
+		events: { on: () => () => undefined, emit() {} },
 		on() {},
 	} as unknown as ExtensionAPI;
 	graphEngineeringExtension(extensionApi);
