@@ -297,7 +297,7 @@ npm run check
 
 ## 发布到 npm
 
-发布动作由 GitHub Release 触发。Release 标签必须严格使用 `v<package.json version>`，例如版本 `1.3.0` 对应 `v1.3.0`。工作流会检出该标签、执行 `npm ci`、`npm run check` 和包内容预检，全部通过后发布公开包 `@viccydev/pi-graph`。普通 Release 发布到 `latest`，Prerelease 发布到 `next`。
+发布动作由 GitHub Release 触发。Release 标签必须严格使用 `v<package.json version>`，例如版本 `1.4.0` 对应 `v1.4.0`。工作流会检出该标签、执行 `npm ci`、`npm run check` 和包内容预检，全部通过后发布公开包 `@viccydev/pi-graph`。普通 Release 发布到 `latest`，Prerelease 发布到 `next`。
 
 发布认证使用 npm Trusted Publishing / OIDC，不使用长期 npm Token。Trusted Publisher 必须精确配置为 GitHub 用户 `linyqh`、仓库 `pi-graph`、工作流文件 `publish.yml`，Allowed action 为 `npm publish`。工作流必须保留 `permissions.id-token: write`，不得重新加入 `NPM_TOKEN` 或 `NODE_AUTH_TOKEN`。
 
