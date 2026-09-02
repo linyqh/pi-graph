@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Graph"
+  short_description: "Safely version or roll back Pi graph workflows"
+  default_prompt: "Use $update-graph to inspect and safely evolve an existing project graph."

@@ -281,10 +281,13 @@ test("extension registration exposes list, create, delete, run, and resume tools
 	assert.equal(graphRunRenderer({ data: { state: running } }, { expanded: false }, theme), undefined);
 	assert.ok(graphRunRenderer({ data: { state: renderState() } }, { expanded: false }, theme));
 	assert.deepEqual([...commands.keys()].sort(), ["graph", "graph-list", "graph-resume", "graph-status"]);
-	assert.deepEqual([...tools.keys()].sort(), ["graph_create", "graph_delete", "graph_list", "graph_resume", "graph_run"]);
+	assert.deepEqual([...tools.keys()].sort(), ["graph_create", "graph_delete", "graph_history", "graph_list", "graph_resume", "graph_rollback", "graph_run", "graph_update"]);
 	assert.equal(tools.get("graph_list")?.executionMode, undefined);
 	assert.equal(tools.get("graph_create")?.executionMode, "sequential");
 	assert.equal(tools.get("graph_delete")?.executionMode, "sequential");
+	assert.equal(tools.get("graph_history")?.executionMode, undefined);
+	assert.equal(tools.get("graph_update")?.executionMode, "sequential");
+	assert.equal(tools.get("graph_rollback")?.executionMode, "sequential");
 	assert.equal(tools.get("graph_resume")?.executionMode, "sequential");
 	assert.equal(tools.get("graph_run")?.executionMode, "sequential");
 	assert.equal(tools.get("graph_run")?.description, formatGraphToolDescription());

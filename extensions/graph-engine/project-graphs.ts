@@ -7,13 +7,14 @@ import {
 	AGENT_GRAPH_DIR_NAME,
 	LEGACY_PI_DIR_NAME,
 	PROJECT_GRAPHS_DIR_NAME,
+	legacyProjectGraphSourcePath,
 	projectGraphSourcePath,
 	resolveAgentGraphProjectPaths,
 } from "./storage.ts";
 import type { JsonObject } from "./types.ts";
 import { validateGraph } from "./validation.ts";
 
-export { AGENT_GRAPH_DIR_NAME, LEGACY_PI_DIR_NAME, PROJECT_GRAPHS_DIR_NAME, projectGraphSourcePath };
+export { AGENT_GRAPH_DIR_NAME, LEGACY_PI_DIR_NAME, PROJECT_GRAPHS_DIR_NAME, legacyProjectGraphSourcePath, projectGraphSourcePath };
 export const PROJECT_GRAPH_MAX_BYTES = 256 * 1024;
 const GRAPH_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
@@ -44,7 +45,7 @@ export interface DeclarativeGraphSpec extends JsonObject {
 
 export interface ProjectGraphCompiler {
 	parse?(source: string, path: string): unknown;
-	compile(spec: DeclarativeGraphSpec, options: { cwd: string; path: string }): RegisteredGraphDefinition;
+	compile(spec: DeclarativeGraphSpec, options: { cwd: string; path: string; sourcePath?: string }): RegisteredGraphDefinition;
 	serialize?(spec: DeclarativeGraphSpec): string;
 }
 
@@ -102,8 +103,8 @@ export const declarativeProjectGraphCompiler: ProjectGraphCompiler = {
 	parse(source) {
 		return parseDeclarativeGraphSpec(JSON.parse(source));
 	},
-	compile(spec) {
-		return compileDeclarativeGraphSpec(spec, { sourcePath: projectGraphSourcePath(spec.name) });
+	compile(spec, options) {
+		return compileDeclarativeGraphSpec(spec, { sourcePath: options.sourcePath ?? projectGraphSourcePath(spec.name) });
 	},
 	serialize(spec) {
 		return `${serializeDeclarativeGraphSpec(spec).json}\n`;

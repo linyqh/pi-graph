@@ -60,6 +60,8 @@ pi install "$PWD"
 
 保存成功后无需 `/reload`，新图会立即出现在 `/graph-list`、`graph_list`、命令补全和 `graph_run` 中。通过 `graph_delete` 删除后目录也会立即刷新。若手工修改或删除 JSON，则需要 `/reload` 重新加载图目录。
 
+更新已有项目图使用 `/graph-update <name> <变更要求>` 或 `update-graph` Skill。它先通过 `graph_history` 读取当前哈希和历史版本，再把完整新 spec 与 `expectedDefinitionHash` 交给 `graph_update`。更新前会展示版本、节点、权限、Tool/Skill 和路由差异并再次确认；禁止直接覆盖 JSON。`graph_rollback` 可在确认后精确重新激活一个历史哈希。
+
 Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi 会话注册了哪些工具，图就能声明哪些工具，包括已安装包和扩展提供的自定义工具（例如 `fpa_query`）。`graph_create` 会用 `pi.getAllTools()` 校验，写错或写了不存在的工具名会明确失败并列出可用名称。创建器为非只读 Subagent 优先保留 Pi 默认的 `read/bash/edit/write` 四个编码工具，再按节点任务追加 `grep/find/ls` 或所需的自定义工具。只读图和并行子节点不会为了凑齐默认工具而获得修改权限；它们只分配实际需要的只读工具。最终写入确认会逐个展示 Subagent 的工具与 Skill 白名单。
 
 引擎无法判断自定义工具做了什么，因此它们默认按只读处理——这正是 `fpa_query` 这类查询工具能出现在只读图和并行子节点里的原因。会改动工作区的自定义工具，需要节点显式声明 `"mutates": true`，此后它与 `bash/edit/write` 受同样约束：只读图拒绝、并行子节点拒绝、`approval-required` 策略下必须绑定审批节点。
@@ -84,7 +86,10 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 - `/graph-resume` 恢复当前会话分支和工作目录中最近的 `paused/interrupted/failed` 运行，也可指定 `runId`。
 - `graph_list` 向模型返回当前工作目录可用图的动态目录。模型应先调用它发现图名。
 - `graph_create` 只负责验证、再次确认和创建新图，不支持覆盖、编辑或删除。
-- `graph_delete` 只删除当前可信项目中已经加载的项目图；删除前展示名称和路径并再次确认。内置图、未知图、无交互界面或用户拒绝时不会删除。
+- `graph_history` 列出项目图不可变 revision；指定哈希时同时返回该版本的完整 spec 及其与当前版本的语义差异。
+- `graph_update` 接受完整新 spec 和当前 `expectedDefinitionHash`，通过 compare-and-swap、交互确认和原子替换激活新版本；名称不能改变，内容变化时版本必须改变。
+- `graph_rollback` 接受目标哈希和当前预期哈希，重新激活目标的精确内容与版本，不制造新的版本号。
+- `graph_delete` 只删除当前可信项目中已经加载的项目图；删除前展示名称和路径并再次确认，同时删除该图的受管 revision 历史。内置图、未知图、无交互界面或用户拒绝时不会删除。
 - `graph_run` 接受动态字符串图名，在执行时查询图目录，并声明为顺序执行。图完成时，终止执行节点的输出会直接进入模型可见的工具正文，并同时保存在 `details.output` 和检查点的 `state.finalOutput` 中；`outputKey` 只决定该值在 `state.data` 中的名称。节点失败时，模型正文改为有效的精简 JSON，包含真实失败节点、错误、`runId` 和安全恢复参数；外层主 Agent 应先诊断并修复可验证的外部原因，再按原样调用返回的 `graph_resume` 参数，不能盲目重试。
 - `graph_run.context` 可携带最多 16 个不可变运行标识，键必须匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`，值必须是最多 256 UTF-8 字节的字符串。Context 独立于可变 `data`，会随检查点持久化并投影到 UI；声明式模板通过 `{{context.<key>}}` 只读访问，恢复时不得替换。
 - `graph_resume` 只供模型恢复当前会话分支、当前工作目录中的精确 `failed` 快照。它要求 `runId` 和预期 `resumeCount`，在执行队列内重新读取最新检查点并做 compare-and-swap 校验，避免重复或过期调用恢复了另一次失败。人工 `/graph-resume` 仍可恢复 `paused/interrupted/failed`。
@@ -218,17 +223,18 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 - 每个文件独立解析；损坏的 JSON 或无效图只产生诊断，不影响内置图和其他有效图。
 - 内置图、项目图之间不能重名，项目图不能遮蔽内置图。
 - `graph_create` 保存前完整编译，批准后使用排他写入，绝不覆盖现有路径。
+- `graph_update` 与 `graph_rollback` 只操作项目图，使用预期哈希拒绝过期请求，并通过事务日志和原子重命名切换激活版本。
 - 手工改图后通过 `/reload` 刷新；通过 `graph_create` 创建则在当前会话立即激活。
 
 旧版 `.pi/graphs/*.json` 在可信项目首次启动时会安全迁移到新目录。迁移前或发生目标冲突时仍可兼容读取旧目录；新建 Graph 只写入新目录，且绝不覆盖同名旧定义。
 
-建议把 `.agent-graph/graphs/` 中的定义纳入版本控制，把 `.agent-graph/runs/` 视为可重建的本地运行数据并加入项目 `.gitignore`。`.agent-graph/catalog/` 预留给目录与晋升元数据，Graph Engine 不会改写其中其他工具管理的内容。
+建议把 `.agent-graph/graphs/` 中的激活定义纳入版本控制，把 `.agent-graph/runs/` 视为可重建的本地运行数据并加入项目 `.gitignore`。受管历史位于 `.agent-graph/catalog/graph-revisions/<name>/`：`revisions/<definitionHash>.json` 保存规范化不可变定义，`history.json` 保存 create/update/rollback/observed 激活记录，`transaction.json` 只在未完成的切换中存在。Graph Engine 不会改写 `.agent-graph/catalog/` 下其他工具管理的目录。
 
 ## 状态与恢复
 
 运行状态为 `running`、`paused`、`interrupted`、`completed` 或 `failed`。每个检查点保存模式版本、图版本、工作目录、当前节点、截断后的节点结果、审批记录、历史摘要、结构化 `lastFailure` 和 `resumeCount`。节点状态还记录当前总尝试次数；每次失败和重试都有独立历史事件。最新快照原子写入 `.agent-graph/runs/<runId>.json`，同时保留 Pi session 的 `graph-run` entry 作为会话事件投影。
 
-项目图还会保存规范化 JSON 的 SHA-256 `definitionHash` 和来源路径。恢复时，即使图名和版本相同，只要 JSON 内容改变也会被拒绝。
+项目图还会保存规范化 JSON 的 SHA-256 `definitionHash` 和来源路径。每个项目图运行开始前，当前定义都会确保写入不可变 revision。恢复时优先匹配激活定义；若 Graph 已受控更新，则按检查点的名称、版本和哈希加载历史 revision，仍由运行时执行完整身份校验。历史缺失、损坏或哈希不匹配时明确失败，不会退回当前版本。
 
 恢复保留原 `runId/data/history`，递增 `resumeCount`，并从 `currentNode` 重新执行。以下情况会拒绝恢复：
 
@@ -240,7 +246,7 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 
 修改型节点在中断后恢复时会再次请求确认。没有交互界面时，审批和修改型恢复都保持 `paused`。`session_start` 会把遗留的 `running` 检查点标记为 `interrupted`。
 
-失败恢复提供 checkpoint-safe retry，不承诺 exactly-once。修改型节点如果在产生部分外部副作用后抛错，再次确认恢复仍可能重复执行；这类节点应使用幂等写入、稳定业务键或显式补偿。项目图内容若在失败后被修改，恢复会因定义哈希变化而拒绝，应启动新运行。
+失败恢复提供 checkpoint-safe retry，不承诺 exactly-once。修改型节点如果在产生部分外部副作用后抛错，再次确认恢复仍可能重复执行；这类节点应使用幂等写入、稳定业务键或显式补偿。受控更新不会改变已经启动的运行；手工编辑仍应先 `/reload`，随后新的运行会归档并绑定编辑后的哈希。
 
 ## TypeScript 图与运行时节点
 
@@ -273,10 +279,10 @@ agent 目录只在派生子进程的 `env` 里生效，不会写进宿主的 `pr
 
 ## 输出限制与边界
 
-- 每个工作目录同时只运行一个活动图；`graph_run`、`graph_resume`、`graph_create` 和 `graph_delete` 都按顺序执行。
+- 每个工作目录同时只运行一个活动图；`graph_run`、`graph_resume`、`graph_create`、`graph_update`、`graph_rollback` 和 `graph_delete` 都按顺序执行。
 - 模型、子代理、工具和渲染器文本统一限制为 50KB/2000 行。
 - 检查点不保存完整消息流，只保留截断后的最终文本、结构化结果、用量、模型和停止原因。
-- 1.1 不支持覆盖、编辑或迁移已有项目图；项目图可通过 `graph_delete` 确认后删除。
+- 项目图支持受控版本更新、历史查询和精确回滚；不允许修改正在执行的 Graph 定义。
 - 1.1 不支持全局图、远程图仓库、跨会话恢复、后台调度、持久化子代理对话、修改型并行子节点或第三方扩展工具。
 
 ## 验证

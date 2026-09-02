@@ -424,24 +424,6 @@ test("graph_run exposes a resumable failure and graph_resume retries the same ru
 		assert.equal(controlFailure.details?.reason, "non_resumable_failure");
 		assert.equal(promptCalls, 1);
 
-		const graphPath = join(cwd, ".agent-graph", "graphs", "recoverable-flow.json");
-		const originalGraph = await readFile(graphPath, "utf8");
-		const changedGraph = JSON.parse(originalGraph) as { description: string };
-		changedGraph.description = "Changed after the failed checkpoint.";
-		await writeFile(graphPath, `${JSON.stringify(changedGraph, null, 2)}\n`, "utf8");
-		const changedDefinition = await tools.get("graph_resume")!.execute(
-			"call",
-			failure.resume.arguments,
-			undefined,
-			undefined,
-			ctx,
-		);
-		assert.equal(changedDefinition.details?.status, "rejected");
-		assert.equal(changedDefinition.details?.reason, "resume_rejected");
-		assert.match(changedDefinition.content[0].text, /definition hash/i);
-		assert.equal(promptCalls, 1);
-		await writeFile(graphPath, originalGraph, "utf8");
-
 		shouldFail = false;
 		const [resumed, stale] = await Promise.all([
 			tools.get("graph_resume")!.execute("call", failure.resume.arguments, undefined, undefined, ctx),
@@ -628,6 +610,140 @@ test("graph_create validates assigned Skills and previews the resolved names", a
 		assert.equal(rejected.details?.status, "invalid");
 		assert.match(rejected.content[0].text, /Assigned skills are not available.*missing/);
 		assert.deepEqual(await graphFileNames(cwd), ["skill-review.json"]);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_update, graph_history, and graph_rollback expose controlled project graph evolution", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools } = registerExtension();
+		const ctx = context(cwd);
+		const v1 = validSpec("evolving-flow");
+		const created = await tools.get("graph_create")!.execute("call", { spec: v1 }, undefined, undefined, ctx);
+		assert.equal(created.details?.status, "created");
+		const listed = await tools.get("graph_list")!.execute("call", {}, undefined, undefined, ctx);
+		const v1Hash = (listed.details?.graphs as Array<{ name: string; definitionHash: string }>).find((item) => item.name === v1.name)!.definitionHash;
+
+		let preview = "";
+		ctx.ui.confirm = async (_title, message) => {
+			preview = message;
+			return true;
+		};
+		const v2 = { ...v1, version: "2.0.0", description: "A safely evolved graph." };
+		const updated = await tools.get("graph_update")!.execute("call", { spec: v2, expectedDefinitionHash: v1Hash }, undefined, undefined, ctx);
+		assert.equal(updated.details?.status, "updated");
+		assert.match(preview, /replace version/);
+		assert.match(preview, /replace description/);
+		const v2Hash = updated.details?.definitionHash as string;
+
+		const history = await tools.get("graph_history")!.execute("call", { graph: v1.name, definitionHash: v1Hash }, undefined, undefined, ctx);
+		assert.equal(history.details?.status, "ok");
+		assert.equal((history.details?.selected as { spec: { version: string } }).spec.version, "1.0.0");
+		const rollbackArgs = {
+			graph: v1.name,
+			targetDefinitionHash: v1Hash,
+			expectedDefinitionHash: v2Hash,
+		};
+		const headlessRollback = await tools.get("graph_rollback")!.execute("call", rollbackArgs, undefined, undefined, context(cwd, { hasUI: false }));
+		assert.equal(headlessRollback.details?.status, "approval_required");
+		const declinedRollback = await tools.get("graph_rollback")!.execute("call", rollbackArgs, undefined, undefined, context(cwd, { approved: false }));
+		assert.equal(declinedRollback.details?.status, "cancelled");
+
+		const rolledBack = await tools.get("graph_rollback")!.execute("call", rollbackArgs, undefined, undefined, ctx);
+		assert.equal(rolledBack.details?.status, "rolled_back");
+		const after = await tools.get("graph_list")!.execute("call", {}, undefined, undefined, ctx);
+		const active = (after.details?.graphs as Array<{ name: string; version: string; definitionHash: string }>).find((item) => item.name === v1.name)!;
+		assert.equal(active.version, "1.0.0");
+		assert.equal(active.definitionHash, v1Hash);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_update requires approval and rejects stale revisions without writes", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools } = registerExtension();
+		const v1 = validSpec("guarded-evolution");
+		const ctx = context(cwd);
+		await tools.get("graph_create")!.execute("call", { spec: v1 }, undefined, undefined, ctx);
+		const listed = await tools.get("graph_list")!.execute("call", {}, undefined, undefined, ctx);
+		const hash = (listed.details?.graphs as Array<{ name: string; definitionHash: string }>).find((item) => item.name === v1.name)!.definitionHash;
+		const v2 = { ...v1, version: "2.0.0" };
+
+		const headless = await tools.get("graph_update")!.execute("call", { spec: v2, expectedDefinitionHash: hash }, undefined, undefined, context(cwd, { hasUI: false }));
+		assert.equal(headless.details?.status, "approval_required");
+		const stale = await tools.get("graph_update")!.execute("call", { spec: v2, expectedDefinitionHash: "a".repeat(64) }, undefined, undefined, ctx);
+		assert.equal(stale.details?.status, "stale");
+
+		const unchanged = JSON.parse(await readFile(join(cwd, ".agent-graph", "graphs", `${v1.name}.json`), "utf8")) as { version: string };
+		assert.equal(unchanged.version, "1.0.0");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_update refuses built-in graphs and unavailable tools", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools } = registerExtension();
+		const ctx = context(cwd);
+		const builtIn = await tools.get("graph_update")!.execute("call", {
+			spec: validSpec("research"),
+			expectedDefinitionHash: "a".repeat(64),
+		}, undefined, undefined, ctx);
+		assert.equal(builtIn.details?.status, "invalid");
+		assert.match(builtIn.content[0].text, /Built-in graph cannot be updated/);
+
+		const v1 = validSpec("invalid-tool-update");
+		await tools.get("graph_create")!.execute("call", { spec: v1 }, undefined, undefined, ctx);
+		const listed = await tools.get("graph_list")!.execute("call", {}, undefined, undefined, ctx);
+		const hash = (listed.details?.graphs as Array<{ name: string; definitionHash: string }>).find((item) => item.name === v1.name)!.definitionHash;
+		const invalidTool = await tools.get("graph_update")!.execute("call", {
+			spec: {
+				...v1,
+				version: "2.0.0",
+				nodes: [{ id: "summarize", type: "tool", tool: "missing_tool", args: {} }],
+			},
+			expectedDefinitionHash: hash,
+		}, undefined, undefined, ctx);
+		assert.equal(invalidTool.details?.status, "invalid");
+		assert.match(invalidTool.content[0].text, /missing_tool/);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_resume uses the archived definition after the active graph is updated", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools, entries } = registerExtension();
+		let fail = true;
+		const ctx = context(cwd, {
+			branch: entries,
+			complete: async () => {
+				if (fail) throw new Error("temporary model failure");
+				return { stopReason: "stop", content: [{ type: "text", text: "resumed old revision" }], usage: {} };
+			},
+		});
+		const v1 = validSpec("revision-resume-flow");
+		await tools.get("graph_create")!.execute("call", { spec: v1 }, undefined, undefined, ctx);
+		const failed = await tools.get("graph_run")!.execute("call", { graph: v1.name, goal: "resume later" }, undefined, undefined, ctx);
+		const failure = JSON.parse(failed.content[0].text) as { resume: { arguments: { runId: string; expectedResumeCount: number } } };
+		const v1Hash = (failed.details?.state as { graphDefinitionHash: string }).graphDefinitionHash;
+		const updated = await tools.get("graph_update")!.execute("call", {
+			spec: { ...v1, version: "2.0.0", description: "New runs use version two." },
+			expectedDefinitionHash: v1Hash,
+		}, undefined, undefined, ctx);
+		assert.equal(updated.details?.status, "updated");
+
+		fail = false;
+		const resumed = await tools.get("graph_resume")!.execute("call", failure.resume.arguments, undefined, undefined, ctx);
+		assert.equal(resumed.details?.status, "completed");
+		assert.equal((resumed.details?.state as { graphVersion: string }).graphVersion, "1.0.0");
+		assert.equal(resumed.content[0].text, "resumed old revision");
 	} finally {
 		await cleanup();
 	}

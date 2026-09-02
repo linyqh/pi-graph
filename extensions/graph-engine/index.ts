@@ -6,6 +6,7 @@ import { graphDefinitions, graphRegistry } from "../../graphs/index.ts";
 import type { GraphCatalog } from "./catalog.ts";
 import { createGraphCatalogStore } from "./catalog.ts";
 import { collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
+import { ProjectGraphRevisionConflictError, type GraphSpecChange } from "./graph-revisions.ts";
 import { declarativeProjectGraphCompiler, migrateLegacyProjectGraphs, PROJECT_GRAPH_MAX_BYTES, resolveProjectGraphsDirectory } from "./project-graphs.ts";
 import { createProjectGraphRunStore } from "./run-store.ts";
 import { findLastGraphRun, findLatestGraphRuns, interruptOrphanedGraphRuns, isLegacyGraphState, resumeGraph, runGraph } from "./runtime.ts";
@@ -113,6 +114,16 @@ function formatStatus(result: Pick<GraphRunResult, "state">): string {
 	if (state.error) lines.push(`error: ${state.error}`);
 	if (isLegacyGraphState(state)) lines.push("legacy checkpoint: view-only; this run cannot be resumed");
 	return truncateText(lines.join("\n")).text;
+}
+
+function formatGraphChanges(changes: GraphSpecChange[]): string {
+	if (changes.length === 0) return "changes=none";
+	const lines = changes.map((change) => {
+		const before = change.before === undefined ? "" : ` before=${JSON.stringify(change.before)}`;
+		const after = change.after === undefined ? "" : ` after=${JSON.stringify(change.after)}`;
+		return `- ${change.kind} ${change.path || "/"}${before}${after}`;
+	});
+	return truncateText(`changes=${changes.length}\n${lines.join("\n")}`).text;
 }
 
 const GRAPH_RUN_MODEL_ERROR_MAX_BYTES = 512;
@@ -296,6 +307,45 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		return catalog;
 	}
 
+	function validateSpecResources(ctx: ExtensionContext, value: unknown) {
+		const spec = parseDeclarativeGraphSpec(value);
+		const skillNames = collectDeclarativeSkillNames(spec);
+		if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames, registeredSkills);
+		resolveAssignedTools(listAvailableToolNames(pi), collectDeclarativeToolNames(spec));
+		return spec;
+	}
+
+	async function runnableGraph(ctx: ExtensionContext, catalog: GraphCatalog, name: string): Promise<GraphCatalog["graphs"][string]> {
+		const graph = catalog.graphs[name];
+		if (!graph) throw new Error(`Unknown graph: ${name}`);
+		if (catalog.entries[name]?.source.kind !== "project" || !ctx.isProjectTrusted()) return graph;
+		const ensured = await catalogStore.ensureProjectGraphRevision({ cwd: ctx.cwd, trusted: true, name });
+		return ensured?.graph.definition ?? graph;
+	}
+
+	async function graphForCheckpoint(ctx: ExtensionContext, state: GraphState): Promise<GraphCatalog["graphs"][string]> {
+		const catalog = await catalogFor(ctx, true);
+		const current = catalog.graphs[state.graphName];
+		if (
+			current
+			&& current.version === state.graphVersion
+			&& current.definitionHash === state.graphDefinitionHash
+			&& current.sourcePath === state.graphSourcePath
+		) return current;
+		if (ctx.isProjectTrusted() && state.graphSourcePath?.startsWith(".agent-graph/graphs/")) {
+			return catalogStore.resolveProjectGraphRevision({
+				cwd: ctx.cwd,
+				trusted: true,
+				name: state.graphName,
+				version: state.graphVersion,
+				definitionHash: state.graphDefinitionHash,
+				sourcePath: state.graphSourcePath,
+			});
+		}
+		if (current) return current;
+		throw new Error(`Graph unavailable for checkpoint: ${state.graphName}`);
+	}
+
 	pi.registerEntryRenderer<{ state?: RenderableGraphState; summary?: string }>("graph-run", (entry, { expanded }, theme) => {
 		const data = entry.data;
 		if (!data?.state) return new Text("Graph run checkpoint unavailable.", 0, 0);
@@ -351,9 +401,11 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				const result = await runQueued(() => {
+				const result = await runQueued(async () => {
+					const currentCatalog = await catalogFor(ctx, true);
+					const executableGraph = await runnableGraph(ctx, currentCatalog, graphName);
 					const checkpoints = ctx.sessionManager.getBranch() as GraphCheckpointEntry[];
-					return runGraph(pi, graph, {
+					return runGraph(pi, executableGraph, {
 						goal,
 						cwd: ctx.cwd,
 						extensionContext: ctx,
@@ -387,12 +439,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 						return;
 					}
 
-					const catalog = await catalogFor(ctx, true);
-					const graph = catalog.graphs[last.graphName];
-					if (!graph) {
-						ctx.ui.notify(formatUnknownGraphMessage(last.graphName, catalog), "error");
-						return;
-					}
+					const graph = await graphForCheckpoint(ctx, last);
 
 					const result = await resumeGraph(pi, graph, last, {
 						cwd: ctx.cwd,
@@ -459,10 +506,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				const spec = parseDeclarativeGraphSpec(params.spec);
-				const skillNames = collectDeclarativeSkillNames(spec);
-				if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames, registeredSkills);
-				resolveAssignedTools(listAvailableToolNames(pi), collectDeclarativeToolNames(spec));
+				const spec = validateSpecResources(ctx, params.spec);
 				const catalog = await catalogFor(ctx);
 				if (catalog.graphs[spec.name]) {
 					throw new Error(`Graph already exists in catalog: ${spec.name}`);
@@ -518,6 +562,170 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const content = result.content[0];
 			return new Text(theme.fg("muted", content?.type === "text" ? content.text : "No graph creation result."), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "graph_history",
+		label: "Graph History",
+		description: "Inspect immutable revisions for a trusted project graph. Optionally select one revision to return its spec and diff from the active definition.",
+		parameters: Type.Object({
+			graph: graphNameParameter(),
+			definitionHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!ctx.isProjectTrusted()) {
+				return { content: [{ type: "text", text: "Project graph history requires a trusted cwd." }], details: { status: "untrusted" } };
+			}
+			try {
+				const inspection = await catalogStore.getProjectGraphHistory({
+					cwd: ctx.cwd,
+					trusted: true,
+					name: params.graph,
+					definitionHash: params.definitionHash,
+				});
+				const text = truncateText(JSON.stringify({ status: "ok", ...inspection }, null, 2)).text;
+				return { content: [{ type: "text", text }], details: { status: "ok", ...inspection } };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { content: [{ type: "text", text: truncateText(`Graph history failed: ${message}`).text }], details: { status: "error", graph: params.graph, error: message } };
+			}
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("graph_history ")) + theme.fg("accent", String(args.graph ?? "...")), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const content = result.content[0];
+			return new Text(theme.fg("muted", content?.type === "text" ? content.text : "No graph history."), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "graph_update",
+		label: "Graph Update",
+		description: "Validate, diff, confirm, and atomically activate a new version of a trusted project graph.",
+		executionMode: "sequential",
+		parameters: Type.Object({
+			spec: DeclarativeGraphSpecSchema,
+			expectedDefinitionHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!ctx.isProjectTrusted()) {
+				return { content: [{ type: "text", text: "Project graph update requires a trusted cwd." }], details: { status: "untrusted" } };
+			}
+			try {
+				const spec = validateSpecResources(ctx, params.spec);
+				const prepared = await catalogStore.prepareProjectGraphUpdate({
+					cwd: ctx.cwd,
+					trusted: true,
+					spec,
+					expectedDefinitionHash: params.expectedDefinitionHash,
+				});
+				if (prepared.noChange) {
+					return { content: [{ type: "text", text: `Graph ${spec.name} is already at the requested definition.` }], details: { status: "no_change", graph: spec.name, definitionHash: params.expectedDefinitionHash } };
+				}
+				const summary = truncateText([
+					`graph=${spec.name}`,
+					`from=${prepared.current.definition.version}@${prepared.current.definition.definitionHash}`,
+					`to=${prepared.candidate.definition.version}@${prepared.candidate.definition.definitionHash}`,
+					formatGraphChanges(prepared.diff),
+					renderDeclarativeGraphSummary(spec),
+				].join("\n")).text;
+				if (!ctx.hasUI) {
+					return { content: [{ type: "text", text: `Graph validated but was not updated because interactive approval is unavailable.\n${summary}` }], details: { status: "approval_required", graph: spec.name, summary } };
+				}
+				if (!await ctx.ui.confirm("Update project graph?", summary)) {
+					return { content: [{ type: "text", text: `Graph update cancelled. No active definition was changed.\n${summary}` }], details: { status: "cancelled", graph: spec.name, summary } };
+				}
+				const updated = await catalogStore.updateProjectGraph({
+					cwd: ctx.cwd,
+					trusted: true,
+					spec,
+					expectedDefinitionHash: params.expectedDefinitionHash,
+				});
+				activeCatalog = updated.catalog;
+				return {
+					content: [{ type: "text", text: truncateText(`Updated graph ${spec.name}.\n${summary}`).text }],
+					details: { status: "updated", graph: spec.name, definitionHash: updated.graph.definition.definitionHash, previousDefinitionHash: params.expectedDefinitionHash, diff: updated.diff },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const stale = error instanceof ProjectGraphRevisionConflictError;
+				return {
+					content: [{ type: "text", text: truncateText(`Graph update ${stale ? "rejected as stale" : "failed validation"}: ${message}`).text }],
+					details: { status: stale ? "stale" : "invalid", error: message, actualDefinitionHash: stale ? error.actualDefinitionHash : undefined },
+				};
+			}
+		},
+		renderCall(args, theme) {
+			const spec = args.spec as { name?: unknown } | undefined;
+			return new Text(theme.fg("toolTitle", theme.bold("graph_update ")) + theme.fg("accent", String(spec?.name ?? "...")), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const content = result.content[0];
+			return new Text(theme.fg("muted", content?.type === "text" ? content.text : "No graph update result."), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "graph_rollback",
+		label: "Graph Rollback",
+		description: "Confirm and reactivate an exact immutable revision of a trusted project graph.",
+		executionMode: "sequential",
+		parameters: Type.Object({
+			graph: graphNameParameter(),
+			targetDefinitionHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+			expectedDefinitionHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!ctx.isProjectTrusted()) {
+				return { content: [{ type: "text", text: "Project graph rollback requires a trusted cwd." }], details: { status: "untrusted" } };
+			}
+			try {
+				const inspection = await catalogStore.getProjectGraphHistory({ cwd: ctx.cwd, trusted: true, name: params.graph, definitionHash: params.targetDefinitionHash });
+				if (!inspection.selected) throw new Error(`Graph revision not found: ${params.targetDefinitionHash}`);
+				validateSpecResources(ctx, inspection.selected.spec);
+				if (inspection.history.headDefinitionHash !== params.expectedDefinitionHash) {
+					throw new ProjectGraphRevisionConflictError("Project graph changed since rollback was requested.", inspection.history.headDefinitionHash);
+				}
+				if (params.targetDefinitionHash === params.expectedDefinitionHash) {
+					return { content: [{ type: "text", text: `Graph ${params.graph} is already at revision ${params.targetDefinitionHash}.` }], details: { status: "no_change", graph: params.graph, definitionHash: params.targetDefinitionHash } };
+				}
+				const target = inspection.history.revisions.find((item) => item.definitionHash === params.targetDefinitionHash);
+				const active = inspection.history.revisions.find((item) => item.definitionHash === params.expectedDefinitionHash);
+				const summary = truncateText([
+					`graph=${params.graph}`,
+					`from=${active?.version ?? "unknown"}@${params.expectedDefinitionHash}`,
+					`to=${target?.version ?? "unknown"}@${params.targetDefinitionHash}`,
+					formatGraphChanges(inspection.selected.diffFromActive),
+				].join("\n")).text;
+				if (!ctx.hasUI) {
+					return { content: [{ type: "text", text: `Graph was not rolled back because interactive approval is unavailable.\n${summary}` }], details: { status: "approval_required", graph: params.graph, summary } };
+				}
+				if (!await ctx.ui.confirm("Rollback project graph?", summary)) {
+					return { content: [{ type: "text", text: `Graph rollback cancelled. No active definition was changed.\n${summary}` }], details: { status: "cancelled", graph: params.graph, summary } };
+				}
+				const rolledBack = await catalogStore.rollbackProjectGraph({
+					cwd: ctx.cwd,
+					trusted: true,
+					name: params.graph,
+					targetDefinitionHash: params.targetDefinitionHash,
+					expectedDefinitionHash: params.expectedDefinitionHash,
+				});
+				activeCatalog = rolledBack.catalog;
+				return { content: [{ type: "text", text: `Rolled back graph ${params.graph} to ${params.targetDefinitionHash}.` }], details: { status: "rolled_back", graph: params.graph, definitionHash: params.targetDefinitionHash, previousDefinitionHash: params.expectedDefinitionHash, diff: rolledBack.diff } };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const stale = error instanceof ProjectGraphRevisionConflictError;
+				return { content: [{ type: "text", text: truncateText(`Graph rollback ${stale ? "rejected as stale" : "failed"}: ${message}`).text }], details: { status: stale ? "stale" : "error", graph: params.graph, error: message, actualDefinitionHash: stale ? error.actualDefinitionHash : undefined } };
+			}
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("graph_rollback ")) + theme.fg("accent", String(args.graph ?? "...")), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const content = result.content[0];
+			return new Text(theme.fg("muted", content?.type === "text" ? content.text : "No graph rollback result."), 0, 0);
 		},
 	});
 
@@ -623,9 +831,11 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const result = await runQueued(() => {
+			const result = await runQueued(async () => {
+				const currentCatalog = await catalogFor(ctx, true);
+				const executableGraph = await runnableGraph(ctx, currentCatalog, params.graph);
 				const checkpoints = ctx.sessionManager.getBranch() as GraphCheckpointEntry[];
-				return runGraph(pi, graph, {
+				return runGraph(pi, executableGraph, {
 					goal: params.goal,
 					input: params.input,
 					context: params.context,
@@ -731,15 +941,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 						);
 					}
 
-					const catalog = await catalogFor(ctx, true);
-					const graph = catalog.graphs[latest.graphName];
-					if (!graph) {
-						return reject(
-							"graph_unavailable",
-							`Graph resume rejected: ${latest.graphName} is unavailable after reloading the current cwd catalog.`,
-							{ graph: latest.graphName },
-						);
-					}
+					const graph = await graphForCheckpoint(ctx, latest);
 
 					const result = await resumeGraph(pi, graph, latest, {
 						cwd: ctx.cwd,

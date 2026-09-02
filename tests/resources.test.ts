@@ -47,6 +47,18 @@ test("graph-create prompt exposes an optional workflow goal and loads the skill 
 	assert.match(prompt, /\$ARGUMENTS/);
 });
 
+test("update-graph resources require history inspection and controlled graph tools", async () => {
+	const skill = await readFile(join(root, "skills", "update-graph", "SKILL.md"), "utf8");
+	const prompt = await readFile(join(root, "prompts", "graph-update.md"), "utf8");
+	assert.match(skill, /^name: update-graph$/m);
+	assert.match(skill, /graph_history/);
+	assert.match(skill, /graph_update/);
+	assert.match(skill, /graph_rollback/);
+	assert.match(skill, /Never edit `.agent-graph\/graphs\/\*\.json` directly/);
+	assert.match(prompt, /^argument-hint: \[graph name and requested change\]$/m);
+	assert.match(prompt, /Load and follow the `update-graph` skill first/);
+});
+
 test("create-graph reference copyable JSON example parses as a declarative graph spec", async () => {
 	const reference = await readFile(join(root, "skills", "create-graph", "references", "graph-spec.md"), "utf8");
 	const match = reference.match(/## Copyable Example[\s\S]*?```json\n(?<json>[\s\S]*?)\n```/);

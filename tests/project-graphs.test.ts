@@ -12,6 +12,7 @@ import {
 	deleteProjectGraph,
 	migrateLegacyProjectGraphs,
 	loadProjectGraphs,
+	legacyProjectGraphSourcePath,
 	PROJECT_GRAPH_MAX_BYTES,
 	projectGraphSourcePath,
 	saveProjectGraph,
@@ -404,6 +405,254 @@ test("project graph checkpoints resume with an unchanged hash and reject changed
 		await assert.rejects(
 			resumeGraph(pi, changed.graphs[0].definition, first.state, { cwd, services }),
 			/definition hash/,
+		);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("catalog updates a project graph through immutable history and rolls back the exact revision", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({
+			builtInDefinitions: [],
+			compiler: declarativeProjectGraphCompiler,
+		});
+		const v1 = declarativeSpec("versioned-project");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec: v1 });
+		const v1Hash = created.graph.definition.definitionHash!;
+		const initial = await store.getProjectGraphHistory({ cwd, trusted: true, name: v1.name });
+		assert.equal(initial.history.headDefinitionHash, v1Hash);
+		assert.deepEqual(initial.history.revisions.map((item) => item.definitionHash), [v1Hash]);
+
+		const v2 = { ...v1, version: "2.0.0", description: "Updated project graph." };
+		const updated = await store.updateProjectGraph({
+			cwd,
+			trusted: true,
+			spec: v2,
+			expectedDefinitionHash: v1Hash,
+		});
+		const v2Hash = updated.graph.definition.definitionHash!;
+		assert.notEqual(v2Hash, v1Hash);
+		assert.equal(updated.catalog.graphs[v1.name].version, "2.0.0");
+		assert.deepEqual(updated.history.revisions.map((item) => item.definitionHash), [v1Hash, v2Hash]);
+		assert.ok(updated.diff.some((item) => item.path === "version"));
+		assert.ok(updated.diff.some((item) => item.path === "description"));
+
+		const selected = await store.getProjectGraphHistory({ cwd, trusted: true, name: v1.name, definitionHash: v1Hash });
+		assert.equal(selected.selected?.spec.version, "1.0.0");
+		assert.ok(selected.selected?.diffFromActive.some((item) => item.path === "version"));
+
+		const rolledBack = await store.rollbackProjectGraph({
+			cwd,
+			trusted: true,
+			name: v1.name,
+			targetDefinitionHash: v1Hash,
+			expectedDefinitionHash: v2Hash,
+		});
+		assert.equal(rolledBack.graph.definition.definitionHash, v1Hash);
+		assert.equal(rolledBack.catalog.graphs[v1.name].version, "1.0.0");
+		assert.equal(rolledBack.history.activations.at(-1)?.action, "rollback");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("catalog rejects stale and same-version updates without changing the active graph", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		const spec = declarativeSpec("guarded-project");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec });
+		const hash = created.graph.definition.definitionHash!;
+		await assert.rejects(
+			store.updateProjectGraph({ cwd, trusted: true, spec: { ...spec, version: "2.0.0" }, expectedDefinitionHash: "a".repeat(64) }),
+			/changed since it was inspected/,
+		);
+		await assert.rejects(
+			store.updateProjectGraph({ cwd, trusted: true, spec: { ...spec, description: "Changed." }, expectedDefinitionHash: hash }),
+			/version must change/,
+		);
+		const current = await store.reload({ cwd, trusted: true });
+		assert.equal(current.graphs[spec.name].definitionHash, hash);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("historical project graph revisions resolve old checkpoints after an update", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		const v1 = declarativeSpec("historical-resume");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec: v1 });
+		const v1Hash = created.graph.definition.definitionHash!;
+		const activeLegacyIdentity = await store.resolveProjectGraphRevision({
+			cwd,
+			trusted: true,
+			name: v1.name,
+			version: "1.0.0",
+			definitionHash: v1Hash,
+			sourcePath: legacyProjectGraphSourcePath(v1.name),
+		});
+		assert.equal(activeLegacyIdentity.sourcePath, legacyProjectGraphSourcePath(v1.name));
+		await store.updateProjectGraph({
+			cwd,
+			trusted: true,
+			spec: { ...v1, version: "2.0.0", description: "New active definition." },
+			expectedDefinitionHash: v1Hash,
+		});
+		const historical = await store.resolveProjectGraphRevision({
+			cwd,
+			trusted: true,
+			name: v1.name,
+			version: "1.0.0",
+			definitionHash: v1Hash,
+			sourcePath: projectGraphSourcePath(v1.name),
+		});
+		assert.equal(historical.version, "1.0.0");
+		assert.equal(historical.definitionHash, v1Hash);
+		assert.equal(historical.sourcePath, projectGraphSourcePath(v1.name));
+		const legacyIdentity = await store.resolveProjectGraphRevision({
+			cwd,
+			trusted: true,
+			name: v1.name,
+			version: "1.0.0",
+			definitionHash: v1Hash,
+			sourcePath: legacyProjectGraphSourcePath(v1.name),
+		});
+		assert.equal(legacyIdentity.sourcePath, legacyProjectGraphSourcePath(v1.name));
+	} finally {
+		await cleanup();
+	}
+});
+
+test("project graph history finishes or abandons an interrupted revision transaction", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		const v1 = declarativeSpec("transaction-recovery");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec: v1 });
+		const v1Hash = created.graph.definition.definitionHash!;
+		const updated = await store.updateProjectGraph({
+			cwd,
+			trusted: true,
+			spec: { ...v1, version: "2.0.0" },
+			expectedDefinitionHash: v1Hash,
+		});
+		const v2Hash = updated.graph.definition.definitionHash!;
+		const historyPath = join(cwd, ".agent-graph", "catalog", "graph-revisions", v1.name, "history.json");
+		const transactionPath = join(cwd, ".agent-graph", "catalog", "graph-revisions", v1.name, "transaction.json");
+		const history = JSON.parse(await readFile(historyPath, "utf8")) as {
+			headDefinitionHash: string;
+			activations: Array<{ toDefinitionHash: string }>;
+		};
+		history.headDefinitionHash = v1Hash;
+		history.activations = history.activations.filter((item) => item.toDefinitionHash !== v2Hash);
+		await writeFile(historyPath, JSON.stringify(history), "utf8");
+		await writeFile(transactionPath, JSON.stringify({
+			schemaVersion: 1,
+			id: "finish-interrupted-update",
+			graph: v1.name,
+			action: "update",
+			fromDefinitionHash: v1Hash,
+			toDefinitionHash: v2Hash,
+			timestamp: 123,
+		}), "utf8");
+		const recovered = await store.getProjectGraphHistory({ cwd, trusted: true, name: v1.name });
+		assert.equal(recovered.history.headDefinitionHash, v2Hash);
+		assert.equal(recovered.history.activations.at(-1)?.id, "finish-interrupted-update");
+		await assert.rejects(lstat(transactionPath), { code: "ENOENT" });
+
+		await writeFile(transactionPath, JSON.stringify({
+			schemaVersion: 1,
+			id: "abandon-unapplied-update",
+			graph: v1.name,
+			action: "update",
+			fromDefinitionHash: v2Hash,
+			toDefinitionHash: "a".repeat(64),
+			timestamp: 456,
+		}), "utf8");
+		const abandoned = await store.getProjectGraphHistory({ cwd, trusted: true, name: v1.name });
+		assert.equal(abandoned.history.headDefinitionHash, v2Hash);
+		assert.ok(!abandoned.history.activations.some((item) => item.id === "abandon-unapplied-update"));
+		await assert.rejects(lstat(transactionPath), { code: "ENOENT" });
+
+		await writeFile(transactionPath, JSON.stringify({
+			schemaVersion: 1,
+			id: "conflicting-update",
+			graph: v1.name,
+			action: "update",
+			fromDefinitionHash: "b".repeat(64),
+			toDefinitionHash: "c".repeat(64),
+			timestamp: 789,
+		}), "utf8");
+		await assert.rejects(
+			store.getProjectGraphHistory({ cwd, trusted: true, name: v1.name }),
+			/transaction conflicts/,
+		);
+		assert.equal((JSON.parse(await readFile(transactionPath, "utf8")) as { id: string }).id, "conflicting-update");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("revision storage rejects symlinked catalog paths before writing outside cwd", async () => {
+	const { cwd, cleanup } = await fixture();
+	const outside = await mkdtemp(join(tmpdir(), "pi-graph-revision-outside-"));
+	try {
+		const spec = declarativeSpec("revision-symlink");
+		await saveProjectGraph({ cwd, trusted: true, compiler: declarativeProjectGraphCompiler, spec });
+		await symlink(outside, join(cwd, ".agent-graph", "catalog"));
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		await assert.rejects(
+			store.ensureProjectGraphRevision({ cwd, trusted: true, name: spec.name }),
+			/must not contain symlinks/,
+		);
+		assert.deepEqual(await readdir(outside), []);
+	} finally {
+		await cleanup();
+		await rm(outside, { recursive: true, force: true });
+	}
+});
+
+test("historical revision resolution rejects corrupted content instead of using active", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		const v1 = declarativeSpec("corrupt-history");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec: v1 });
+		const v1Hash = created.graph.definition.definitionHash!;
+		await store.updateProjectGraph({ cwd, trusted: true, spec: { ...v1, version: "2.0.0" }, expectedDefinitionHash: v1Hash });
+		const revisionPath = join(cwd, ".agent-graph", "catalog", "graph-revisions", v1.name, "revisions", `${v1Hash}.json`);
+		await writeFile(revisionPath, JSON.stringify({ ...v1, description: "tampered" }), "utf8");
+		await assert.rejects(
+			store.resolveProjectGraphRevision({ cwd, trusted: true, name: v1.name, version: "1.0.0", definitionHash: v1Hash, sourcePath: projectGraphSourcePath(v1.name) }),
+			/hash does not match|Immutable graph revision conflict/,
+		);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("historical revision resolution rejects missing and oversized revision files", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const store = createGraphCatalogStore({ builtInDefinitions: [], compiler: declarativeProjectGraphCompiler });
+		const v1 = declarativeSpec("missing-history");
+		const created = await store.saveProjectGraph({ cwd, trusted: true, spec: v1 });
+		const v1Hash = created.graph.definition.definitionHash!;
+		await store.updateProjectGraph({ cwd, trusted: true, spec: { ...v1, version: "2.0.0" }, expectedDefinitionHash: v1Hash });
+		const revisionPath = join(cwd, ".agent-graph", "catalog", "graph-revisions", v1.name, "revisions", `${v1Hash}.json`);
+		await rm(revisionPath);
+		await assert.rejects(
+			store.resolveProjectGraphRevision({ cwd, trusted: true, name: v1.name, version: "1.0.0", definitionHash: v1Hash, sourcePath: projectGraphSourcePath(v1.name) }),
+			{ code: "ENOENT" },
+		);
+		await writeFile(revisionPath, "x".repeat(PROJECT_GRAPH_MAX_BYTES + 1), "utf8");
+		await assert.rejects(
+			store.resolveProjectGraphRevision({ cwd, trusted: true, name: v1.name, version: "1.0.0", definitionHash: v1Hash, sourcePath: projectGraphSourcePath(v1.name) }),
+			/exceeds/,
 		);
 	} finally {
 		await cleanup();

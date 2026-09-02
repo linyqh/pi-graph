@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -92,6 +92,10 @@ test("graph_delete removes an approved project graph and refreshes graph_list im
 		assert.equal(deleted.details?.status, "deleted");
 		assert.equal(deleted.details?.path, join(cwd, ".agent-graph", "graphs", "deletable-flow.json"));
 		assert.deepEqual(await graphFileNames(cwd), []);
+		await assert.rejects(
+			lstat(join(cwd, ".agent-graph", "catalog", "graph-revisions", "deletable-flow")),
+			{ code: "ENOENT" },
+		);
 
 		const listed = await invoke(tools.get("graph_list")!, {}, ctx);
 		assert.doesNotMatch(listed.content[0].text, /deletable-flow/);
@@ -142,5 +146,28 @@ test("graph_delete refuses built-in and unknown graphs before confirmation", asy
 		assert.match(unknown.content[0].text, /Unknown graph/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("graph_delete refuses a symlinked revision directory before deleting the active graph", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-graph-delete-revision-symlink-"));
+	const outside = await mkdtemp(join(tmpdir(), "pi-graph-delete-revision-outside-"));
+	try {
+		const tools = registerExtension();
+		const ctx = context(cwd);
+		await invoke(tools.get("graph_create")!, { spec: validSpec("symlink-history") }, ctx);
+		const revisions = join(cwd, ".agent-graph", "catalog", "graph-revisions", "symlink-history", "revisions");
+		await rm(revisions, { recursive: true });
+		const outsideFile = join(outside, `${"a".repeat(64)}.json`);
+		await writeFile(outsideFile, "outside", "utf8");
+		await symlink(outside, revisions);
+
+		const deleted = await invoke(tools.get("graph_delete")!, { graph: "symlink-history" }, ctx);
+		assert.equal(deleted.details?.status, "error");
+		assert.equal(await readFile(outsideFile, "utf8"), "outside");
+		assert.equal((JSON.parse(await readFile(join(cwd, ".agent-graph", "graphs", "symlink-history.json"), "utf8")) as { name: string }).name, "symlink-history");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+		await rm(outside, { recursive: true, force: true });
 	}
 });

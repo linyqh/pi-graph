@@ -1,9 +1,23 @@
 import type { RegisteredGraphDefinition } from "./registry.ts";
 import { createGraphRegistry } from "./registry.ts";
+import {
+	assertProjectGraphRevisionHistoryDeletable,
+	deleteProjectGraphRevisionHistory,
+	ensureProjectGraphRevision,
+	getProjectGraphRevisionHistory,
+	prepareProjectGraphUpdate,
+	resolveProjectGraphRevision,
+	rollbackProjectGraphRevision,
+	updateProjectGraphRevision,
+	type GraphRevisionInspection,
+	type PreparedGraphRevisionChange,
+	type ProjectGraphHistory,
+} from "./graph-revisions.ts";
 import type {
 	DeclarativeGraphSpec,
 	DeleteProjectGraphResult,
 	LoadProjectGraphsResult,
+	LoadedProjectGraph,
 	ProjectGraphCompiler,
 	ProjectGraphDiagnostic,
 	SaveProjectGraphResult,
@@ -55,6 +69,17 @@ export interface DeleteCatalogGraphRequest extends GraphCatalogRequest {
 
 export interface DeleteCatalogGraphResult extends DeleteProjectGraphResult {
 	catalog: GraphCatalog;
+}
+
+export interface UpdateCatalogGraphRequest extends GraphCatalogRequest {
+	spec: DeclarativeGraphSpec;
+	expectedDefinitionHash: string;
+}
+
+export interface RollbackCatalogGraphRequest extends GraphCatalogRequest {
+	name: string;
+	targetDefinitionHash: string;
+	expectedDefinitionHash: string;
 }
 
 interface CachedCatalog {
@@ -180,6 +205,15 @@ export class GraphCatalogStore {
 			compiler: this.compiler,
 			spec: request.spec,
 		});
+		if (saved.graph.definition.definitionHash) {
+			await ensureProjectGraphRevision({
+				cwd: request.cwd,
+				trusted: request.trusted,
+				compiler: this.compiler,
+				name: request.spec.name,
+				action: "create",
+			});
+		}
 		const catalog = await this.reload(request);
 		return {
 			...saved,
@@ -187,11 +221,63 @@ export class GraphCatalogStore {
 		};
 	}
 
+	async ensureProjectGraphRevision(request: GraphCatalogRequest & { name: string }): Promise<{ graph: LoadedProjectGraph; history: ProjectGraphHistory } | undefined> {
+		const current = await this.reload(request);
+		const entry = current.entries[request.name];
+		if (!entry) throw new Error(`Unknown graph: ${request.name}`);
+		if (entry.source.kind !== "project") return undefined;
+		if (!entry.definition.definitionHash) return undefined;
+		return ensureProjectGraphRevision({ ...request, compiler: this.compiler });
+	}
+
+	async prepareProjectGraphUpdate(request: UpdateCatalogGraphRequest): Promise<PreparedGraphRevisionChange> {
+		const current = await this.reload(request);
+		const entry = current.entries[request.spec.name];
+		if (!entry) throw new Error(`Unknown graph: ${request.spec.name}`);
+		if (entry.source.kind !== "project") throw new Error(`Built-in graph cannot be updated: ${request.spec.name}`);
+		return prepareProjectGraphUpdate({ ...request, compiler: this.compiler });
+	}
+
+	async updateProjectGraph(request: UpdateCatalogGraphRequest) {
+		await this.prepareProjectGraphUpdate(request);
+		const updated = await updateProjectGraphRevision({ ...request, compiler: this.compiler });
+		const catalog = await this.reload(request);
+		return { ...updated, catalog };
+	}
+
+	async getProjectGraphHistory(request: GraphCatalogRequest & { name: string; definitionHash?: string }): Promise<GraphRevisionInspection> {
+		const current = await this.reload(request);
+		const entry = current.entries[request.name];
+		if (!entry) throw new Error(`Unknown graph: ${request.name}`);
+		if (entry.source.kind !== "project") throw new Error(`Built-in graph has no project revision history: ${request.name}`);
+		return getProjectGraphRevisionHistory({ ...request, compiler: this.compiler });
+	}
+
+	async rollbackProjectGraph(request: RollbackCatalogGraphRequest) {
+		const current = await this.reload(request);
+		const entry = current.entries[request.name];
+		if (!entry) throw new Error(`Unknown graph: ${request.name}`);
+		if (entry.source.kind !== "project") throw new Error(`Built-in graph cannot be rolled back: ${request.name}`);
+		const rolledBack = await rollbackProjectGraphRevision({ ...request, compiler: this.compiler });
+		const catalog = await this.reload(request);
+		return { ...rolledBack, catalog };
+	}
+
+	async resolveProjectGraphRevision(request: GraphCatalogRequest & {
+		name: string;
+		version: string | undefined;
+		definitionHash: string | undefined;
+		sourcePath: string | undefined;
+	}): Promise<RegisteredGraphDefinition> {
+		return resolveProjectGraphRevision({ ...request, compiler: this.compiler });
+	}
+
 	async deleteProjectGraph(request: DeleteCatalogGraphRequest): Promise<DeleteCatalogGraphResult> {
 		const current = await this.reload(request);
 		const entry = current.entries[request.name];
 		if (!entry) throw new Error(`Unknown graph: ${request.name}`);
 		if (entry.source.kind !== "project") throw new Error(`Built-in graph cannot be deleted: ${request.name}`);
+		await assertProjectGraphRevisionHistoryDeletable(request.cwd, request.name);
 
 		const deleted = await deleteProjectGraph({
 			cwd: request.cwd,
@@ -199,6 +285,7 @@ export class GraphCatalogStore {
 			compiler: this.compiler,
 			name: request.name,
 		});
+		await deleteProjectGraphRevisionHistory(request.cwd, request.name);
 		const catalog = await this.reload(request);
 		return {
 			...deleted,
