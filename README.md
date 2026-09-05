@@ -11,7 +11,7 @@
 ## 环境与安装
 
 - Node.js `>=22.19`
-- Pi `@earendil-works/pi-coding-agent ^0.84.1`
+- Pi `@earendil-works/pi-coding-agent 0.85.x`
 
 从 npm 安装正式版本：
 
