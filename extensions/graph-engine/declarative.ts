@@ -366,7 +366,7 @@ function validateTemplate(template: string, path: string, issues: string[], enfo
 		issues.push(issue(path, `prompt template must be at most ${MAX_PROMPT_TEMPLATE_BYTES} bytes`));
 	}
 	for (const expression of templateReferences(template)) validatePathExpression(expression, path, issues);
-	if (template.replaceAll(/\{\{\s*([^{}]+?)\s*\}\}/g, "").includes("{{") || template.replaceAll(/\{\{\s*([^{}]+?)\s*\}\}/g, "").includes("}}")) {
+	if (template.replaceAll(/\{\{\s*([^{}]+?)\s*\}\}/g, "").includes("{{")) {
 		issues.push(issue(path, "template contains an unclosed or malformed placeholder"));
 	}
 }

@@ -65,16 +65,20 @@ Read `references/graph-spec.md` before asking questions, drafting a graph, or ca
 5. Confirm shared understanding before creation.
    - When the decision frontier is empty, show a concise graph summary in the presentation language: file path, purpose, safety policy, start node, nodes, localized transition labels, each subagent's tool and Skill allowlists, approval gates, failure/retry policy, router cases, parallel lanes, and any limits.
    - Ask for explicit shared-understanding confirmation.
-   - Do not call `graph_create` until the user clearly confirms.
+   - Do not activate a graph until the user clearly confirms; `validateOnly: true` may run while drafting.
 
 6. Create the graph through the tool.
-   - Call `graph_create` with the confirmed JSON spec.
+   - Call `graph_create` with the confirmed draft’s `specFile`.
    - Do not write `.agent-graph/graphs` files yourself.
-   - Do not call `graph_create` before confirmation.
+   - Do not submit without `validateOnly` before confirmation.
 
 ## Error Handling
 
 - If `graph_create` returns a validation error, reopen only the affected decision branch.
 - Fix only the invalid part of the spec.
-- Recompute the summary and get explicit shared-understanding confirmation again before retrying `graph_create`.
+- Recompute the summary. Reopen confirmation only if the correction changes the agreed behavior or permissions; routine syntax fixes keep the existing scope.
 - If a validation error reveals a larger product decision, ask the next numbered question instead of guessing.
+
+## Submitting the draft
+
+Write the graph to a separate draft JSON file. Prefer `graph_create({specFile: "path/to/draft.json", validateOnly: true})` to validate before approval, then submit the same `specFile` without `validateOnly`. Do not retype large graphs as inline tool arguments. Preserve `next`, `outputKey`, `parseJson`, and `label`. On validation failure, edit the indicated fields in the draft; do not repeat unchanged JSON. Two identical validation errors stop the agent turn. Never use internal revision functions through bash to bypass the tool workflow.

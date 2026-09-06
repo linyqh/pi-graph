@@ -334,3 +334,7 @@ When a child fails, the parallel node stops assigning queued children and waits 
   ]
 }
 ```
+
+## Draft file submission
+
+`graph_create` and `graph_update` accept exactly one of `spec` or `specFile` (absolute or relative to cwd). Prefer a separate draft file for multi-node graphs; the tool reads it once and commits the exact candidate shown for approval. `validateOnly: true` validates and previews without writing graph or history files or requesting approval. Updates still require `expectedDefinitionHash`. Ordinary nested JSON closing braces (`}}`) are literal text; only `{{ ... }}` opens a graph placeholder.

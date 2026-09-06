@@ -8,6 +8,7 @@ import graphEngineeringExtension from "../extensions/graph-engine/index.ts";
 import type { GraphCheckpointEntry } from "../extensions/graph-engine/types.ts";
 
 type ToolResult = {
+	terminate?: boolean;
 	content: Array<{ type: "text"; text: string }>;
 	details?: Record<string, unknown>;
 };
@@ -26,6 +27,7 @@ type CapturedTool = {
 
 function registerExtension(overrides: Partial<ExtensionAPI> = {}) {
 	const tools = new Map<string, CapturedTool>();
+	const handlers = new Map<string, Array<(...args: any[]) => any>>();
 	const entries: GraphCheckpointEntry[] = [];
 	const extensionApi = {
 		appendEntry(customType: string, data: unknown) {
@@ -37,11 +39,11 @@ function registerExtension(overrides: Partial<ExtensionAPI> = {}) {
 			tools.set(tool.name, tool);
 		},
 		events: { on: () => () => undefined, emit() {} },
-		on() {},
+		on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		...overrides,
 	} as unknown as ExtensionAPI;
 	graphEngineeringExtension(extensionApi);
-	return { tools, entries };
+	return { tools, entries, handlers };
 }
 
 function validSpec(name = "instant-flow") {
@@ -809,4 +811,84 @@ test("graph_create validates skill dependencies per parallel child before asking
 	} finally {
 		await cleanup();
 	}
+});
+
+test("file drafts validate without writes, preserve fields through approval, and refresh the catalog", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools } = registerExtension();
+		const file = join(cwd, "draft.json");
+		const spec = validSpec("file-edit");
+		await writeFile(file, JSON.stringify(spec));
+		const call = (tool: string, params: Record<string, unknown>, ctx = context(cwd)) => tools.get(tool)!.execute("call", params, undefined, undefined, ctx);
+		const preview = await call("graph_create", { specFile: "draft.json", validateOnly: true }, context(cwd, { hasUI: false }));
+		assert.equal(preview.details?.status, "validated");
+		assert.deepEqual(await graphFileNames(cwd), []);
+		assert.deepEqual((await readdir(cwd)).sort(), ["draft.json"]);
+		assert.equal((await call("graph_create", { specFile: file }, context(cwd, { approved: false }))).details?.status, "cancelled");
+		assert.equal((await call("graph_create", { specFile: file })).details?.status, "created");
+		const listed = await call("graph_list", {});
+		const hash = (listed.details?.graphs as Array<{ name: string; definitionHash: string }>).find((g) => g.name === "file-edit")!.definitionHash;
+		const updated = { ...spec, version: "1.1.0", nodes: [
+			{ ...spec.nodes[0], next: "finish", label: "第一步", outputKey: "answer", parseJson: true },
+			{ id: "finish", type: "prompt", prompt: 'Result: {{data.answer}}. Example: {"nested":{"status":"ok"}}' },
+		] };
+		await writeFile(file, JSON.stringify(updated));
+		const beforeHistory = await readFile(join(cwd, ".agent-graph/catalog/graph-revisions/file-edit/history.json"), "utf8");
+		assert.equal((await call("graph_update", { specFile: file, expectedDefinitionHash: hash, validateOnly: true })).details?.status, "validated");
+		assert.equal(await readFile(join(cwd, ".agent-graph/catalog/graph-revisions/file-edit/history.json"), "utf8"), beforeHistory);
+		const ctx = context(cwd);
+		ctx.ui.confirm = async () => { await writeFile(file, JSON.stringify({ ...updated, version: "9.9.9" })); return true; };
+		assert.equal((await call("graph_update", { specFile: file, expectedDefinitionHash: hash }, ctx)).details?.status, "updated");
+		const activePath = join(cwd, ".agent-graph/graphs/file-edit.json");
+		assert.deepEqual(JSON.parse(await readFile(activePath, "utf8")), updated, "commit the previewed snapshot even if draft changes during confirmation");
+		assert.match((await call("graph_list", {})).content[0].text, /file-edit v1.1.0/);
+		assert.equal((await call("graph_update", { specFile: file, expectedDefinitionHash: hash })).details?.status, "stale");
+		// Simulate a legitimate external writer and ensure list never returns an old snapshot.
+		await writeFile(activePath, JSON.stringify({ ...updated, version: "1.2.0" }));
+		assert.match((await call("graph_list", {})).content[0].text, /file-edit v1.2.0/);
+	} finally { await cleanup(); }
+});
+
+test("missing next identifies the broken field; repeated errors stop the turn and mark the result as an error", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools, handlers } = registerExtension();
+		const spec = { ...validSpec("broken-links"), nodes: [
+			{ id: "summarize", type: "prompt", prompt: "First" },
+			{ id: "finish", type: "prompt", prompt: "Last" },
+		] };
+		const ctx = context(cwd);
+		const call = () => tools.get("graph_create")!.execute("call", { spec }, undefined, undefined, ctx);
+		const first = await call();
+		assert.equal(first.details?.status, "invalid");
+		assert.match(first.content[0].text, /nodes.summarize.next/);
+		assert.match(first.content[0].text, /specFile/);
+		assert.equal(first.terminate, false);
+		const second = await call();
+		assert.equal(second.terminate, true);
+		assert.equal(second.details?.attempts, 2);
+		assert.deepEqual(handlers.get("tool_result")![0]({ toolName: "graph_create", details: second.details }), { isError: true });
+		for (const handler of handlers.get("before_agent_start") ?? []) await handler({}, ctx);
+		assert.equal((await call()).terminate, false);
+		const repaired = { ...spec, nodes: [{ ...spec.nodes[0], next: "finish" }, spec.nodes[1]] };
+		assert.equal((await tools.get("graph_create")!.execute("call", { spec: repaired }, undefined, undefined, ctx)).details?.status, "created");
+	} finally { await cleanup(); }
+});
+
+test("file submission rejects absent/ambiguous inputs, invalid JSON, oversized files and untrusted projects", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const { tools } = registerExtension();
+		const call = (params: Record<string, unknown>, ctx = context(cwd)) => tools.get("graph_create")!.execute("call", params, undefined, undefined, ctx);
+		assert.equal((await call({})).details?.status, "invalid");
+		assert.match((await call({ spec: validSpec(), specFile: "missing" })).content[0].text, /exactly one/);
+		assert.match((await call({ specFile: "missing" })).content[0].text, /ENOENT/);
+		await writeFile(join(cwd, "bad.json"), "not json");
+		assert.equal((await call({ specFile: "bad.json" })).details?.status, "invalid");
+		await writeFile(join(cwd, "large.json"), " ".repeat(256 * 1024 + 1));
+		assert.match((await call({ specFile: "large.json" })).content[0].text, /exceeds/);
+		assert.equal((await call({ specFile: "missing" }, context(cwd, { trusted: false }))).details?.status, "untrusted");
+		assert.deepEqual(await graphFileNames(cwd), []);
+	} finally { await cleanup(); }
 });

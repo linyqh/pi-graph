@@ -1,3 +1,4 @@
+import { readGraphEditInput, graphEditError, GraphEditFailureTracker } from "./edit-input.ts";
 import { listGraphToolCapabilities, listGraphSkillCapabilities, resolveSubagentExtensions, validateSkillTools } from "./capabilities.ts";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -6,7 +7,7 @@ import { join } from "node:path";
 import { graphDefinitions, graphRegistry } from "../../graphs/index.ts";
 import type { GraphCatalog } from "./catalog.ts";
 import { createGraphCatalogStore } from "./catalog.ts";
-import { allNodes, collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
+import { type DeclarativeGraphSpec, allNodes, collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
 import { ProjectGraphRevisionConflictError, type GraphSpecChange } from "./graph-revisions.ts";
 import { declarativeProjectGraphCompiler, migrateLegacyProjectGraphs, PROJECT_GRAPH_MAX_BYTES, resolveProjectGraphsDirectory } from "./project-graphs.ts";
 import { createProjectGraphRunStore } from "./run-store.ts";
@@ -280,6 +281,34 @@ async function runQueued<T>(run: () => Promise<T>): Promise<T> {
 }
 
 export default function graphEngineeringExtension(pi: ExtensionAPI) {
+	const editFailures = new GraphEditFailureTracker();
+	let editTurnStopped = false;
+	const resetEditFailures = () => { editFailures.clear(); editTurnStopped = false; };
+	pi.on("before_agent_start", resetEditFailures);
+	pi.on("session_start", resetEditFailures);
+	pi.on("tool_call", () => editTurnStopped ? {
+		block: true, terminate: true,
+		reason: "This turn stopped after repeated graph edit errors. Fix the draft and retry on a new user turn; do not bypass graph_update through other tools.",
+	} : undefined);
+	pi.on("tool_result", (event) => {
+		if (!["graph_create", "graph_update", "graph_rollback", "graph_history"].includes(event.toolName)) return;
+		const status = (event.details as { status?: string } | undefined)?.status;
+		if (status && ["invalid", "stale", "untrusted", "error"].includes(status)) return { isError: true };
+	});
+	function editFailure(ctx: ExtensionContext, tool: string, error: unknown, spec?: DeclarativeGraphSpec) {
+		const message = graphEditError(error, spec);
+		const key = `${ctx.cwd}\0${tool}\0${spec?.name ?? "unknown"}`;
+		const recovery = editFailures.record(key, message);
+		if (recovery.repeated) editTurnStopped = true;
+		const stale = error instanceof ProjectGraphRevisionConflictError;
+		return {
+			content: [{ type: "text" as const, text: truncateText(`Graph ${tool === "graph_create" ? "creation" : "update"} ${stale ? "rejected as stale" : "failed validation"}: ${message}\n${recovery.guidance}`).text }],
+			details: { status: stale ? "stale" : "invalid", error: message, repeatedFailure: recovery.repeated, attempts: recovery.attempts, actualDefinitionHash: stale ? error.actualDefinitionHash : undefined },
+			isError: true,
+			terminate: recovery.repeated,
+		};
+	}
+
 	const registeredSkills: AssignedSkill[] = [];
 	pi.events.on(GRAPH_ASSIGNED_SKILL_REGISTER_CHANNEL, (value) => {
 		const skill = parseRegisteredAssignedSkill(value);
@@ -492,7 +521,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		description: "List built-in and trusted project graphs available in the current cwd, including load diagnostics.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const catalog = await catalogFor(ctx);
+			const catalog = await catalogFor(ctx, true);
 			const text = catalog.definitions.length > 0 ? formatGraphListText(catalog) : "No graphs registered.";
 			return {
 				content: [{ type: "text", text }],
@@ -526,7 +555,9 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		description: "Validate and save a confirmed declarative graph in the trusted current project. Inspect graph_capabilities first; call only after the create-graph skill reaches shared understanding.",
 		executionMode: "sequential",
 		parameters: Type.Object({
-			spec: DeclarativeGraphSpecSchema,
+			spec: Type.Optional(DeclarativeGraphSpecSchema),
+			specFile: Type.Optional(Type.String({ minLength: 1, description: "Path to a draft JSON file (relative to cwd or absolute). Prefer this for large graphs. Supply exactly one of spec/specFile." })),
+			validateOnly: Type.Optional(Type.Boolean({ description: "Validate and preview without asking for approval or writing any graph/history files." })),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
@@ -534,8 +565,9 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 				return { content: [{ type: "text", text }], details: { status: "untrusted" } };
 			}
 
+			let spec: DeclarativeGraphSpec | undefined;
 			try {
-				const spec = validateSpecResources(ctx, params.spec);
+				spec = validateSpecResources(ctx, await readGraphEditInput(params, ctx.cwd));
 				const catalog = await catalogFor(ctx);
 				if (catalog.graphs[spec.name]) {
 					throw new Error(`Graph already exists in catalog: ${spec.name}`);
@@ -551,6 +583,10 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 				}
 				const summary = `${renderDeclarativeGraphSummary(spec)}\npath=${path}`;
 
+				editFailures.reset(`${ctx.cwd}\0graph_create\0${spec.name}`);
+				if (params.validateOnly) {
+					return { content: [{ type: "text", text: `Graph validated. No files were written.\n${summary}` }], details: { status: "validated", graph: spec.name, summary } };
+				}
 				if (!ctx.hasUI) {
 					return {
 						content: [{ type: "text", text: truncateText(`Graph validated but was not written because interactive approval is unavailable.\n${summary}`).text }],
@@ -573,17 +609,13 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 					details: { status: "created", graph: spec.name, path: saved.path, summary },
 				};
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: truncateText(`Graph creation failed validation: ${message}`).text }],
-					details: { status: "invalid", error: message },
-				};
+				return editFailure(ctx, "graph_create", error, spec);
 			}
 		},
 		renderCall(args, theme) {
 			const spec = args.spec as { name?: unknown } | undefined;
 			return new Text(
-				theme.fg("toolTitle", theme.bold("graph_create ")) + theme.fg("accent", String(spec?.name ?? "...")),
+				theme.fg("toolTitle", theme.bold("graph_create ")) + theme.fg("accent", String(spec?.name ?? args.specFile ?? "...")),
 				0,
 				0,
 			);
@@ -632,18 +664,21 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "graph_update",
 		label: "Graph Update",
-		description: "Validate, diff, confirm, and atomically activate a new version of a trusted project graph.",
+		description: "Validate, diff, confirm, and atomically activate a project graph. Prefer specFile to preserve draft fields; use validateOnly to preview. After an error, fix the draft instead of repeating inline JSON.",
 		executionMode: "sequential",
 		parameters: Type.Object({
-			spec: DeclarativeGraphSpecSchema,
+			spec: Type.Optional(DeclarativeGraphSpecSchema),
+			specFile: Type.Optional(Type.String({ minLength: 1, description: "Path to a draft JSON file (relative to cwd or absolute). Prefer this for large graphs. Supply exactly one of spec/specFile." })),
+			validateOnly: Type.Optional(Type.Boolean({ description: "Validate and preview without asking for approval or writing any graph/history files." })),
 			expectedDefinitionHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
 				return { content: [{ type: "text", text: "Project graph update requires a trusted cwd." }], details: { status: "untrusted" } };
 			}
+			let spec: DeclarativeGraphSpec | undefined;
 			try {
-				const spec = validateSpecResources(ctx, params.spec);
+				spec = validateSpecResources(ctx, await readGraphEditInput(params, ctx.cwd));
 				const prepared = await catalogStore.prepareProjectGraphUpdate({
 					cwd: ctx.cwd,
 					trusted: true,
@@ -660,6 +695,10 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 					formatGraphChanges(prepared.diff),
 					renderDeclarativeGraphSummary(spec),
 				].join("\n")).text;
+				editFailures.reset(`${ctx.cwd}\0graph_update\0${spec.name}`);
+				if (params.validateOnly) {
+					return { content: [{ type: "text", text: `Graph validated. No files were written.\n${summary}` }], details: { status: "validated", graph: spec.name, summary } };
+				}
 				if (!ctx.hasUI) {
 					return { content: [{ type: "text", text: `Graph validated but was not updated because interactive approval is unavailable.\n${summary}` }], details: { status: "approval_required", graph: spec.name, summary } };
 				}
@@ -678,17 +717,12 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 					details: { status: "updated", graph: spec.name, definitionHash: updated.graph.definition.definitionHash, previousDefinitionHash: params.expectedDefinitionHash, diff: updated.diff },
 				};
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				const stale = error instanceof ProjectGraphRevisionConflictError;
-				return {
-					content: [{ type: "text", text: truncateText(`Graph update ${stale ? "rejected as stale" : "failed validation"}: ${message}`).text }],
-					details: { status: stale ? "stale" : "invalid", error: message, actualDefinitionHash: stale ? error.actualDefinitionHash : undefined },
-				};
+				return editFailure(ctx, "graph_update", error, spec);
 			}
 		},
 		renderCall(args, theme) {
 			const spec = args.spec as { name?: unknown } | undefined;
-			return new Text(theme.fg("toolTitle", theme.bold("graph_update ")) + theme.fg("accent", String(spec?.name ?? "...")), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("graph_update ")) + theme.fg("accent", String(spec?.name ?? args.specFile ?? "...")), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			const content = result.content[0];

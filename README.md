@@ -60,7 +60,7 @@ pi install "$PWD"
 
 保存成功后无需 `/reload`，新图会立即出现在 `/graph-list`、`graph_list`、命令补全和 `graph_run` 中。通过 `graph_delete` 删除后目录也会立即刷新。若手工修改或删除 JSON，则需要 `/reload` 重新加载图目录。
 
-更新已有项目图使用 `/graph-update <name> <变更要求>` 或 `update-graph` Skill。它先通过 `graph_history` 读取当前哈希和历史版本，再把完整新 spec 与 `expectedDefinitionHash` 交给 `graph_update`。更新前会展示版本、节点、权限、Tool/Skill 和路由差异并再次确认；禁止直接覆盖 JSON。`graph_rollback` 可在确认后精确重新激活一个历史哈希。
+更新已有项目图使用 `/graph-update <name> <变更要求>` 或 `update-graph` Skill。它先通过 `graph_history` 读取当前哈希和历史版本，编辑独立草稿文件，再把 `specFile` 与 `expectedDefinitionHash` 交给 `graph_update`。更新前会展示版本、节点、权限、Tool/Skill 和路由差异并再次确认；禁止直接覆盖 JSON。`graph_rollback` 可在确认后精确重新激活一个历史哈希。
 
 Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi 会话注册了哪些工具，图就能声明哪些工具，包括已安装包和扩展提供的自定义工具（例如 `fpa_query`）。`graph_create` 会用 `pi.getAllTools()` 校验，写错或写了不存在的工具名会明确失败并列出可用名称。创建器为非只读 Subagent 优先保留 Pi 默认的 `read/bash/edit/write` 四个编码工具，再按节点任务追加 `grep/find/ls` 或所需的自定义工具。只读图和并行子节点不会为了凑齐默认工具而获得修改权限；它们只分配实际需要的只读工具。最终写入确认会逐个展示 Subagent 的工具与 Skill 白名单。
 
@@ -224,7 +224,7 @@ Subagent 与 `tool` 节点的工具名不再受固定白名单限制：当前 Pi
 - 内置图、项目图之间不能重名，项目图不能遮蔽内置图。
 - `graph_create` 保存前完整编译，批准后使用排他写入，绝不覆盖现有路径。
 - `graph_update` 与 `graph_rollback` 只操作项目图，使用预期哈希拒绝过期请求，并通过事务日志和原子重命名切换激活版本。
-- 手工改图后通过 `/reload` 刷新；通过 `graph_create` 创建则在当前会话立即激活。
+- `graph_list` 每次重新读取项目图；通过 `graph_create` 创建则在当前会话立即激活。
 
 旧版 `.pi/graphs/*.json` 在可信项目首次启动时会安全迁移到新目录。迁移前或发生目标冲突时仍可兼容读取旧目录；新建 Graph 只写入新目录，且绝不覆盖同名旧定义。
 
@@ -323,3 +323,15 @@ Call `graph_capabilities` before creating or updating a graph. It returns a pagi
 Children keep an explicit tool allowlist and skill paths. A startup check fails before a model request if an assigned tool did not load, instead of silently accepting Pi's ignored unknown names. Skills do not grant tools. Read the skill and its references when choosing task-specific tools; skills may optionally declare `graph-required-tools: [read, some_tool]` in frontmatter. These declared dependencies are validated per node during create/update/rollback and execution. No system can infer every undeclared task dependency from a skill name alone.
 
 Embedded hosts can register `GraphHostEnvironment.preparePiProcess(args, env)` through `host-bridge.ts` to choose their bundled Node/Pi runtime and supply scoped provider capabilities. Preserve the supplied arguments and environment, including explicit extension paths and `PI_GRAPH_CHILD_SELECTION`. File-backed tool extensions are discovered from Pi 0.85 `getAllTools().sourceInfo.path`. Hosts using inline factories must provide a file-backed equivalent before assigning those tools to children.
+
+## Reliable graph edits
+
+For large graphs, copy the active spec into a separate draft, edit that file, then submit its path. `graph_create` and `graph_update` accept exactly one of `spec` or `specFile`; paths may be absolute or relative to cwd. Files must be regular JSON files of at most 256 KiB.
+
+```json
+{"specFile":".work/graph-draft.json","expectedDefinitionHash":"<active hash from graph_list>","validateOnly":true}
+```
+
+`validateOnly` checks the candidate and previews the change without confirmation or graph/history writes. Remove it to submit normally. The tool reads the draft once, validates tool/Skill assignments, shows the diff, asks for approval and activates that exact in-memory candidate with the existing hash guard and immutable revisions. File edits made during the approval dialog cannot silently alter the confirmed candidate.
+
+Validation failures are marked as actual Pi tool errors. Broken-link diagnostics identify reachable nodes whose missing `next` may explain unreachable nodes. A second identical edit error stops the current turn and blocks further tool calls in that turn; the next user turn starts fresh. Correct the draft instead of repeating full inline JSON or invoking internal revision APIs through bash. `graph_list` refreshes the project catalog on every call. JSON closing braces (`}}`) are permitted as literal prompt text; malformed opening placeholders (`{{`) are still rejected.
