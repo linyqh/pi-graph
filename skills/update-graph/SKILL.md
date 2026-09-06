@@ -15,7 +15,7 @@ Read `../create-graph/references/graph-spec.md` completely before drafting a cha
 2. Call `graph_history` for that graph. When inspecting or rolling back a particular revision, pass its exact hash.
 3. For an update, treat the selected active spec as immutable input and interview the user only about decisions that affect the changed behavior, permissions, failure policy, or presentation language.
 4. Produce a complete replacement spec. Keep `name` unchanged, choose an explicit version different from the active version, and preserve unrelated fields.
-5. Resolve every Tool and Skill name from the live session. Never invent a name or widen a Tool/Skill allowlist without explaining it.
+5. Call `graph_capabilities` (discover with `tool_search` if needed), follow all `nextOffset` pages, and resolve every Tool and Skill name from this full catalog, including inactive tools. Require `subagent: "available"` for subagent tools and `toolNode: true` for direct tool nodes. Read assigned SKILL.md files, include task-specific dependencies and catalog `requiredTools` explicitly; skills never enable tools. Never invent a name or widen a Tool/Skill allowlist without explaining it.
 6. Show the intended version change, node additions/removals, changed fields, permission changes, Tool/Skill changes, approvals, retries, and routing changes. Obtain explicit shared-understanding confirmation.
 7. Call `graph_update` with the complete confirmed spec and the active `expectedDefinitionHash`. Never edit `.agent-graph/graphs/*.json` directly.
 

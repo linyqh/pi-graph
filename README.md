@@ -310,3 +310,16 @@ Pi 手工冒烟流程：
 5. 对修改图拒绝计划审批时应无修改，批准后才允许执行修改节点。
 6. 修改已保存的 JSON 后，旧检查点应因哈希不匹配而拒绝恢复。
 7. 让一个只读节点失败，`graph_run` 正文应是可解析 JSON；修复外部原因后用其中的 `graph_resume` 参数恢复，`runId` 应不变且 `resumeCount` 加一。
+
+## Lazy tool discovery and child agents (Pi 0.85.x)
+
+Call `graph_capabilities` before creating or updating a graph. It returns a paginated catalog of **all registered tools**, including inactive tools, plus assignable skills. It does not activate tools or return their parameter schemas. Follow `nextOffset` until null; filters are optional.
+
+- `subagent: "available"`: builtin tool or a reloadable extension file. The engine forwards only the extensions owning the assigned tools to the child CLI.
+- `subagent: "unavailable"`: parent-only SDK/inline tool, such as a host's `tool_search`; creation rejects assigning it to a child.
+- `subagent: "unverified"`: host supplied names without source metadata; actual child startup remains authoritative.
+- `toolNode`: whether the graph engine can execute this tool directly. Custom direct tool nodes need a host tool resolver.
+
+Children keep an explicit tool allowlist and skill paths. A startup check fails before a model request if an assigned tool did not load, instead of silently accepting Pi's ignored unknown names. Skills do not grant tools. Read the skill and its references when choosing task-specific tools; skills may optionally declare `graph-required-tools: [read, some_tool]` in frontmatter. These declared dependencies are validated per node during create/update/rollback and execution. No system can infer every undeclared task dependency from a skill name alone.
+
+Embedded hosts can register `GraphHostEnvironment.preparePiProcess(args, env)` through `host-bridge.ts` to choose their bundled Node/Pi runtime and supply scoped provider capabilities. Preserve the supplied arguments and environment, including explicit extension paths and `PI_GRAPH_CHILD_SELECTION`. File-backed tool extensions are discovered from Pi 0.85 `getAllTools().sourceInfo.path`. Hosts using inline factories must provide a file-backed equivalent before assigning those tools to children.

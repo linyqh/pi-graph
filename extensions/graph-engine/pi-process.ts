@@ -1,10 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSkillSelectionArgs, type AssignedSkill } from "./skill-selection.ts";
-import { graphChildProcessEnv } from "./host-bridge.ts";
+import { getGraphHostEnvironment, graphChildProcessEnv } from "./host-bridge.ts";
 
 const MAX_CAPTURED_STDERR = 50 * 1024;
 
@@ -15,6 +16,7 @@ export interface PiPromptOptions {
 	provider?: string;
 	model?: string;
 	tools: string[];
+	extensionPaths?: string[];
 	skills: AssignedSkill[];
 	sessionId?: string;
 	sessionDir?: string;
@@ -163,8 +165,20 @@ export function buildPiPromptArgs(options: PiPromptOptions): string[] {
 	return args;
 }
 
+function resolveChildToolsExtension(): string {
+	try {
+		// Hosts may bundle this module; import.meta.url then points at their server.
+		return createRequire(import.meta.url).resolve("@viccydev/pi-graph/extensions/graph-engine/child-tools.ts");
+	} catch {
+		const local = fileURLToPath(new URL("./child-tools.ts", import.meta.url));
+		if (fs.existsSync(local)) return local;
+		throw new Error("Graph child tool validation extension is missing from the installed package.");
+	}
+}
+
 export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
 	const args = buildPiPromptArgs(options);
+	const childToolsExtension = resolveChildToolsExtension();
 
 	let temp: { dir: string; file: string } | undefined;
 	if (options.systemPrompt?.trim()) {
@@ -172,6 +186,8 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 		args.push("--append-system-prompt", temp.file);
 	}
 
+	for (const extension of new Set(options.extensionPaths ?? [])) args.push("--extension", extension);
+	args.push("--extension", childToolsExtension);
 	args.push(options.prompt);
 
 	const result: PiPromptResult = {
@@ -183,15 +199,17 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 	};
 
 	try {
-		const invocation = getPiInvocation(args);
+		const childEnv = { ...graphChildProcessEnv(), PI_GRAPH_CHILD_SELECTION: JSON.stringify({ tools: options.tools, skills: options.skills }) };
+		const prepared = getGraphHostEnvironment()?.preparePiProcess?.(args, childEnv);
+		const invocation = prepared ?? getPiInvocation(args);
 		let wasAborted = false;
 
 		result.exitCode = await new Promise<number>((resolve) => {
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: options.cwd,
 				env: {
-					...graphChildProcessEnv(),
-					...(invocation.electronRunAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+					...(prepared?.env ?? childEnv),
+					...("electronRunAsNode" in invocation && invocation.electronRunAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
 				},
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
@@ -215,6 +233,10 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 					event = JSON.parse(line);
 				} catch {
 					return;
+				}
+				if (event.type === "graph_child_error") {
+					result.stopReason = "error";
+					result.errorMessage = String(event.message);
 				}
 				if (event.type === "session" && typeof event.id === "string") {
 					result.sessionId = event.id;
@@ -276,10 +298,20 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 			}
 		});
 
+		for (const line of result.stderr.split("\n")) {
+			try {
+				const event = JSON.parse(line);
+				if (event.type === "graph_child_error") {
+					result.stopReason = "error";
+					result.errorMessage = String(event.message);
+				}
+			} catch { /* Ordinary CLI diagnostics are retained as stderr. */ }
+		}
 		if (wasAborted) {
 			result.stopReason = "aborted";
 			result.errorMessage = "Graph child pi process was aborted.";
 		}
+		if (result.errorMessage && result.stopReason === "error" && result.exitCode === 0) result.exitCode = 1;
 		return result;
 	} finally {
 		if (temp) {

@@ -24,7 +24,7 @@ type CapturedTool = {
 	): Promise<ToolResult>;
 };
 
-function registerExtension() {
+function registerExtension(overrides: Partial<ExtensionAPI> = {}) {
 	const tools = new Map<string, CapturedTool>();
 	const entries: GraphCheckpointEntry[] = [];
 	const extensionApi = {
@@ -38,6 +38,7 @@ function registerExtension() {
 		},
 		events: { on: () => () => undefined, emit() {} },
 		on() {},
+		...overrides,
 	} as unknown as ExtensionAPI;
 	graphEngineeringExtension(extensionApi);
 	return { tools, entries };
@@ -591,7 +592,8 @@ test("graph_create validates assigned Skills and previews the resolved names", a
 				prompt: "Review {{goal}}.",
 			}],
 		};
-		const availableSkillPrompt = `<available_skills><skill><name>code-review</name><description>Review code.</description><location>/tmp/code-review/SKILL.md</location></skill></available_skills>`;
+		await writeFile(join(cwd, "SKILL.md"), "---\nname: code-review\ndescription: Review code\n---\n");
+		const availableSkillPrompt = `<available_skills><skill><name>code-review</name><description>Review code.</description><location>${join(cwd, "SKILL.md")}</location></skill></available_skills>`;
 		let preview = "";
 		const acceptedContext = context(cwd, { systemPrompt: availableSkillPrompt });
 		acceptedContext.ui.confirm = async (_title, message) => {
@@ -744,6 +746,66 @@ test("graph_resume uses the archived definition after the active graph is update
 		assert.equal(resumed.details?.status, "completed");
 		assert.equal((resumed.details?.state as { graphVersion: string }).graphVersion, "1.0.0");
 		assert.equal(resumed.content[0].text, "resumed old revision");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_capabilities paginates inactive tools without enabling them and rejects parent-only assignments", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const extension = join(cwd, "plugin.ts");
+		await writeFile(extension, "export default function () {}\n");
+		let activations = 0;
+		const { tools } = registerExtension({
+			getAllTools: () => [
+				{ name: "read", sourceInfo: { path: "<builtin:read>", source: "builtin" } },
+				{ name: "hidden_query", sourceInfo: { path: extension, source: "local" } },
+				{ name: "tool_search", sourceInfo: { path: "<inline:search>", source: "sdk" } },
+			] as ReturnType<ExtensionAPI["getAllTools"]>,
+			setActiveTools: () => { activations++; },
+		});
+		const ctx = context(cwd);
+		const page = await tools.get("graph_capabilities")!.execute("call", { limit: 1 }, undefined, undefined, ctx);
+		assert.equal(page.details?.total, 3);
+		assert.equal(page.details?.nextOffset, 1);
+		const last = await tools.get("graph_capabilities")!.execute("call", { offset: 2, limit: 1 }, undefined, undefined, ctx);
+		assert.equal(last.details?.nextOffset, null);
+		const hidden = await tools.get("graph_capabilities")!.execute("call", { query: "hidden_query" }, undefined, undefined, ctx);
+		assert.match(hidden.content[0].text, /"subagent":"available"/);
+		assert.equal(activations, 0);
+		const spec = { ...validSpec("inline-tool"), nodes: [{ id: "summarize", type: "subagent", agentName: "worker", prompt: "Work", tools: ["tool_search"], skills: [] }] };
+		const rejected = await tools.get("graph_create")!.execute("call", { spec }, undefined, undefined, ctx);
+		assert.equal(rejected.details?.status, "invalid");
+		assert.match(rejected.content[0].text, /cannot load.*tool_search/);
+		assert.deepEqual(await graphFileNames(cwd), []);
+		const acceptedSpec = { ...spec, name: "inactive-tool", nodes: [{ ...spec.nodes[0], tools: ["hidden_query"] }] };
+		const accepted = await tools.get("graph_create")!.execute("call", { spec: acceptedSpec }, undefined, undefined, ctx);
+		assert.equal(accepted.details?.status, "created", accepted.content[0].text);
+		assert.equal(activations, 0);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("graph_create validates skill dependencies per parallel child before asking for approval", async () => {
+	const { cwd, cleanup } = await fixture();
+	try {
+		const skillPath = join(cwd, "SKILL.md");
+		await writeFile(skillPath, "---\nname: inspect\ngraph-required-tools: [query_tool]\n---\n");
+		const { tools } = registerExtension({ getAllTools: () => [{ name: "read" }, { name: "query_tool" }] as ReturnType<ExtensionAPI["getAllTools"]> });
+		let confirmations = 0;
+		const ctx = context(cwd, { systemPrompt: `<skill><name>inspect</name><location>${skillPath}</location></skill>` });
+		ctx.ui.confirm = async () => { confirmations++; return true; };
+		const spec = { ...validSpec("missing-dependency"), nodes: [{ id: "summarize", type: "parallel", children: [
+			{ id: "first", type: "subagent", agentName: "first", prompt: "Inspect", tools: ["read"], skills: ["inspect"] },
+			{ id: "second", type: "subagent", agentName: "second", prompt: "Query", tools: ["query_tool"], skills: [] },
+		] }] };
+		const result = await tools.get("graph_create")!.execute("call", { spec }, undefined, undefined, ctx);
+		assert.equal(result.details?.status, "invalid");
+		assert.match(result.content[0].text, /requires assigned tools: query_tool/);
+		assert.equal(confirmations, 0);
+		assert.deepEqual(await graphFileNames(cwd), []);
 	} finally {
 		await cleanup();
 	}

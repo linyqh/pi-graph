@@ -16,6 +16,9 @@ const HOST_ENVIRONMENT_KEY = Symbol.for("pi-graph.host-environment");
 export type GraphToolResolver = (name: string, ctx?: ExtensionContext) => ToolDefinition | undefined;
 
 export interface GraphHostEnvironment {
+	/** Host-owned CLI/runtime and per-child capabilities; never mutate process.env. */
+	preparePiProcess?: (args: string[], env: NodeJS.ProcessEnv) =>
+		{ command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined;
 	/**
 	 * The agent directory the host passes to the SDK. Child Pi processes have no
 	 * other way to find it — without it they read the default `~/.pi/agent`,

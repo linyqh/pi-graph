@@ -1,3 +1,4 @@
+import { listGraphToolCapabilities, listGraphSkillCapabilities, resolveSubagentExtensions, validateSkillTools } from "./capabilities.ts";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -5,7 +6,7 @@ import { join } from "node:path";
 import { graphDefinitions, graphRegistry } from "../../graphs/index.ts";
 import type { GraphCatalog } from "./catalog.ts";
 import { createGraphCatalogStore } from "./catalog.ts";
-import { collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
+import { allNodes, collectDeclarativeSkillNames, collectDeclarativeToolNames, DeclarativeGraphSpecSchema, parseDeclarativeGraphSpec, renderDeclarativeGraphSummary, serializeDeclarativeGraphSpec } from "./declarative.ts";
 import { ProjectGraphRevisionConflictError, type GraphSpecChange } from "./graph-revisions.ts";
 import { declarativeProjectGraphCompiler, migrateLegacyProjectGraphs, PROJECT_GRAPH_MAX_BYTES, resolveProjectGraphsDirectory } from "./project-graphs.ts";
 import { createProjectGraphRunStore } from "./run-store.ts";
@@ -312,6 +313,11 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		const skillNames = collectDeclarativeSkillNames(spec);
 		if (skillNames.length > 0) resolveAssignedSkills(ctx.getSystemPrompt(), skillNames, registeredSkills);
 		resolveAssignedTools(listAvailableToolNames(pi), collectDeclarativeToolNames(spec));
+		for (const node of allNodes(spec)) {
+			if (node.type !== "subagent") continue;
+			resolveSubagentExtensions(pi, node.tools);
+			validateSkillTools(resolveAssignedSkills(ctx.getSystemPrompt(), node.skills ?? [], registeredSkills), node.tools);
+		}
 		return spec;
 	}
 
@@ -458,6 +464,29 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "graph_capabilities",
+		label: "Graph Capabilities",
+		description: "Discover all registered tools (including inactive ones) and skills for graph node assignment, with child-loadability and required tools. Does not enable tools. Call before graph_create/update; paginate until nextOffset is null.",
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Filter names/descriptions; omit for the full catalog." })),
+			offset: Type.Optional(Type.Integer({ minimum: 0 })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const query = (params.query ?? "").trim().toLowerCase();
+			const entries = [
+				...listGraphToolCapabilities(pi, ctx).map((tool) => ({ kind: "tool", ...tool })),
+				...listGraphSkillCapabilities(ctx.getSystemPrompt(), registeredSkills).map((skill) => ({ kind: "skill", ...skill })),
+			].filter((entry) => !query || JSON.stringify(entry).toLowerCase().includes(query));
+			const offset = params.offset ?? 0;
+			const limit = params.limit ?? 40;
+			const end = offset + limit;
+			const details = { entries: entries.slice(offset, end), total: entries.length, nextOffset: end < entries.length ? end : null };
+			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+		},
+	});
+
+	pi.registerTool({
 		name: "graph_list",
 		label: "Graph List",
 		description: "List built-in and trusted project graphs available in the current cwd, including load diagnostics.",
@@ -494,7 +523,7 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "graph_create",
 		label: "Graph Create",
-		description: "Validate and save a confirmed declarative graph in the trusted current project. Call only after the create-graph skill reaches shared understanding.",
+		description: "Validate and save a confirmed declarative graph in the trusted current project. Inspect graph_capabilities first; call only after the create-graph skill reaches shared understanding.",
 		executionMode: "sequential",
 		parameters: Type.Object({
 			spec: DeclarativeGraphSpecSchema,

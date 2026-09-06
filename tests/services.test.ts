@@ -219,7 +219,7 @@ test("runSubagent loads an explicitly registered hidden Skill", {
 		await services.runSubagent({
 			agentName: "executor",
 			prompt: "Execute safely",
-			tools: [],
+			tools: ["read"],
 			skills: ["execution-guard"],
 			cwd,
 		});

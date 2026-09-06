@@ -22,7 +22,7 @@ Use this reference when creating a graph through the `create-graph` skill. The u
 - Declare subagent tools explicitly. Any tool the current Pi session registers is allowed, not just the built-in coding tools. For non-read-only subagents, prefer Pi's default coding baseline `['read', 'bash', 'edit', 'write']`, then add `grep`, `find`, `ls`, or the custom tools the task actually needs.
 - Never invent a tool name. `graph_create` validates every name against the live session and fails with the available list when one is missing.
 - The default coding baseline is a creation preference, not an automatic permission escalation. Read-only graphs and parallel children must omit `bash`, `edit`, and `write`; give them `read` plus only the read-only search tools and read-only custom tools they need.
-- Declare every subagent's `skills` explicitly by Skill name. Select only names present in the current Pi `<available_skills>` list whose descriptions directly match the node task; use `[]` when none match and never invent names.
+- Declare every subagent's `skills` explicitly by Skill name. Select only names present in `graph_capabilities` whose descriptions directly match the node task; use `[]` when none match and never invent names.
 - A subagent with one or more assigned Skills must include `read`. At runtime the graph engine disables automatic Skill discovery and loads only the selected Skills.
 - Use router equality cases only. Do not use arbitrary expressions or model-generated routing code.
 - Use only safe template variables: `{{goal}}`, `{{cwd}}`, `{{context.<key>}}`, and `{{data.<path>}}`.
@@ -146,8 +146,10 @@ Use the following allocation policy:
 
 - Implementation-capable subagent: begin with `["read", "bash", "edit", "write"]` so it retains Pi's normal coding capabilities.
 - Add `grep`, `find`, and `ls` only when repository search or navigation materially helps that node.
-- Add a custom tool (one registered by an installed package or extension, such as a data-query tool) only when that node's task needs it. Check your own tool list for the exact name.
+- Add a custom tool (one registered by an installed package or extension, such as a data-query tool) only when that node's task needs it. Use the complete paginated `graph_capabilities` catalog for exact names, including inactive tools; require `subagent: "available"`. Do not assign parent-only inline tools.
 - Read-only or parallel subagent: use `["read"]` as the baseline and add only `grep`, `find`, `ls`, or read-only custom tools as needed. It cannot receive `bash`, `edit`, or `write`, nor be marked `"mutates": true`.
+
+Skills do not activate tools. Read the assigned SKILL.md, include its task-specific tool dependencies explicitly, and include catalog `requiredTools`. Optional `graph-required-tools: [read, some_tool]` frontmatter declares hard dependencies checked during create/update/rollback and execution.
 
 For Skills, compare the node's responsibility with the names and descriptions in Pi's current `<available_skills>` block. Assign the smallest directly relevant set. Skill names are resolved to their current paths when the graph runs, so Graph JSON remains portable and does not store machine-specific absolute paths. Unknown or unavailable Skill names make creation or execution fail explicitly.
 

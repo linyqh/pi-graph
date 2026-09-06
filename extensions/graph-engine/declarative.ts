@@ -397,7 +397,7 @@ function collectArgTemplates(value: unknown, path: string, issues: string[]): vo
 	}
 }
 
-function allNodes(spec: DeclarativeGraphSpec): DeclarativeGraphNode[] {
+export function allNodes(spec: DeclarativeGraphSpec): DeclarativeGraphNode[] {
 	const nodes: DeclarativeGraphNode[] = [];
 	for (const node of spec.nodes) {
 		nodes.push(node);

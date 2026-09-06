@@ -7,6 +7,7 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
+import { resolveSubagentExtensions, validateSkillTools } from "./capabilities.ts";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
@@ -259,7 +260,10 @@ export function createGraphExecutionServices(
 				const model = request.model ?? context?.model?.id;
 				const systemPrompt = context?.getSystemPrompt?.() ?? "";
 				const skills = resolveAssignedSkills(systemPrompt, request.skills, registeredSkills());
+				validateSkillTools(skills, request.tools);
+				const extensionPaths = resolveSubagentExtensions(api, request.tools);
 				const result = await runPiSubagent({
+					extensionPaths,
 					agentName: request.agentName,
 					sessionId,
 					sessionDir: context?.sessionManager.getSessionDir(),
