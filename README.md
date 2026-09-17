@@ -336,7 +336,7 @@ For large graphs, copy the active spec into a separate draft, edit that file, th
 
 Validation failures are marked as actual Pi tool errors. Broken-link diagnostics identify reachable nodes whose missing `next` may explain unreachable nodes. A second identical edit error stops the current turn and blocks further tool calls in that turn; the next user turn starts fresh. Correct the draft instead of repeating full inline JSON or invoking internal revision APIs through bash. `graph_list` refreshes the project catalog on every call. JSON closing braces (`}}`) are permitted as literal prompt text; malformed opening placeholders (`{{`) are still rejected.
 
-## v2 持久化执行（源码候选，尚未发布）
+## v2 持久化执行（1.6.0 起）
 
 声明式图显式使用 `schemaVersion: 2`；TypeScript 图设置 `executionVersion: 2`，并提供覆盖完整实现配置的 `definitionHash`。未声明的 TypeScript 图和 v1 JSON 保持原有执行语义；既有检查点不能升级成 v2 后恢复。
 
