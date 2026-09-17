@@ -1,3 +1,4 @@
+import { GRAPH_CONTRACT_REQUEST, GRAPH_CONTRACT_REGISTER, isGraphContract, type GraphRegisteredContract } from "./contracts.ts";
 import { readGraphEditInput, graphEditError, GraphEditFailureTracker } from "./edit-input.ts";
 import { listGraphToolCapabilities, listGraphSkillCapabilities, resolveSubagentExtensions, validateSkillTools } from "./capabilities.ts";
 import { Type } from "@earendil-works/pi-ai";
@@ -309,6 +310,10 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		};
 	}
 
+	const registeredContracts: GraphRegisteredContract[] = [];
+	pi.events.on(GRAPH_CONTRACT_REGISTER, (value) => {
+		if (isGraphContract(value) && !registeredContracts.includes(value)) registeredContracts.push(value);
+	});
 	const registeredSkills: AssignedSkill[] = [];
 	pi.events.on(GRAPH_ASSIGNED_SKILL_REGISTER_CHANNEL, (value) => {
 		const skill = parseRegisteredAssignedSkill(value);
@@ -319,9 +324,11 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 	});
 	const requestRegisteredSkills = () => {
 		registeredSkills.length = 0;
+		registeredContracts.length = 0;
+		pi.events.emit(GRAPH_CONTRACT_REQUEST, { schemaVersion: 1 });
 		pi.events.emit(GRAPH_ASSIGNED_SKILL_REQUEST_CHANNEL, { schemaVersion: 1 });
 	};
-	const servicesFor = (ctx: ExtensionContext) => createGraphExecutionServices(ctx, pi, () => registeredSkills);
+	const servicesFor = (ctx: ExtensionContext) => createGraphExecutionServices(ctx, pi, () => registeredSkills, () => registeredContracts);
 	requestRegisteredSkills();
 
 	const catalogStore = createGraphCatalogStore({

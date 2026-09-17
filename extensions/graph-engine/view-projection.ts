@@ -69,7 +69,7 @@ function rawEdges(graph: GraphDefinition): RawEdge[] {
 	const parallelJoins = new Map<string, RawEdge[]>();
 	for (const edge of transitionList(graph)) {
 		const source = graph.nodes[edge.from];
-		if (source?.type === "parallel" && source.children && source.children.length > 0) {
+		if ((source?.type === "parallel" || source?.type === "map") && source.children && source.children.length > 0) {
 			parallelJoins.set(source.id, source.children.map((child) => ({
 					from: child.id,
 					to: edge.to,
@@ -193,15 +193,29 @@ function childTraversalCount(history: GraphEvent[], parentId: string, childId: s
 }
 
 export function projectGraphRunView(graph: GraphDefinition, state: GraphState): GraphRunProjection {
+	// Runtime map children come from the persisted manifest, never model-created graph code.
+	graph = { ...graph, nodes: Object.fromEntries(Object.entries(graph.nodes).map(([id, node]) => {
+		if (node.type !== "map") return [id, node];
+		const batch = state.batches?.[id];
+		return [id, { ...node, children: (batch?.tasks ?? []).flatMap((task) => {
+			const template = node.children?.find((child) => child.id === task.template);
+			return template ? [{ ...template, id: `${id}:${task.taskId}`, label: task.label ?? task.taskId }] : [];
+		}) }];
+	})) };
+
 	const flatNodes = flattenGraphNodes(graph);
 	const nodes: GraphRunProjectionNode[] = flatNodes.map(({ node, parentId }) => {
 		const runtime = state.nodes[node.id] ?? { status: "pending" as const };
+		const task = state.tasks?.[node.id];
+		const required = parentId ? state.batches?.[parentId]?.tasks.find(item => `${parentId}:${item.taskId}` === node.id)?.required : undefined;
 		return {
 			id: node.id,
 			parentId,
 			label: boundedText(node.label ?? node.id, 128)!,
 			type: node.type,
 			status: runtime.status,
+			task: task ? { attempts: task.attempts, corrections: task.corrections ?? 0, reusedCount: task.reusedCount ?? 0,
+				feedback: boundedText(task.feedback, 1024), nextRetryAt: task.nextRetryAt, errorKind: boundedText(task.errorKind, 32), required, usage: task.usage } : undefined,
 			startedAt: runtime.startedAt,
 			completedAt: runtime.completedAt,
 			error: boundedText(runtime.error, 256),
@@ -258,6 +272,9 @@ export function projectGraphRunView(graph: GraphDefinition, state: GraphState): 
 		updatedAt: state.updatedAt,
 		completedAt: state.completedAt,
 		resumeCount: state.resumeCount,
+		execution: state.schemaVersion === 2 ? { version: 2, resumable: state.status === "failed" && state.lastFailure?.resumable === true,
+			deadlineAt: state.deadlineAt, usage: state.usage,
+			budget: { maxInvocations: 256, maxRequests: 1024, maxTokens: 10000000, maxCost: 1000, ...graph.budget } } : undefined,
 		progress: {
 			completed: nodes.filter((node) => node.status === "completed").length,
 			total: nodes.length,

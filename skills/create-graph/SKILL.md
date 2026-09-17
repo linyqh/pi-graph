@@ -82,3 +82,9 @@ Read `references/graph-spec.md` before asking questions, drafting a graph, or ca
 ## Submitting the draft
 
 Write the graph to a separate draft JSON file. Prefer `graph_create({specFile: "path/to/draft.json", validateOnly: true})` to validate before approval, then submit the same `specFile` without `validateOnly`. Do not retype large graphs as inline tool arguments. Preserve `next`, `outputKey`, `parseJson`, and `label`. On validation failure, edit the indicated fields in the draft; do not repeat unchanged JSON. Two identical validation errors stop the agent turn. Never use internal revision functions through bash to bypass the tool workflow.
+
+## Durable v2 task boundaries
+
+For schemaVersion 2, prefer a fixed business graph with bounded readonly `map` analysis only when the task set genuinely varies. Declare `itemsPath`, `minItems`, `maxItems` (at most 16), `concurrency` (at most 4), and readonly leaf `templates` (at most 8). Tasks carry only stable taskId, allowed template, object input (at most 64 KiB), required and label. They cannot change permissions or routing. Use `data.mapTask.input` in the template. Required failure blocks aggregation; optional failure must be preserved in downstream limitations. Freeze one batch before execution; do not re-plan on resume.
+
+The earlier prohibition on parallel-child `failure` is the v1 rule. In v2, readonly parallel/map leaves may have bounded transient retry and output validation/correction policies; they still cannot redirect control flow. Plugin-owned `guard` and `validation.validator` names must already be registered; graph authoring must not invent an implementation or use them as approval. Recovery retains the original graph, context, batch and consumed budgets.

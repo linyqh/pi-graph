@@ -1,3 +1,4 @@
+import type { GraphRegisteredContract } from "./contracts.ts";
 import { boundedExecutionValue } from "./output-contract.ts";
 import { GraphExecutionError, providerExecutionError } from "./execution-policy.ts";
 import { GraphControlFlowError } from "./types.ts";
@@ -177,6 +178,7 @@ export function createGraphExecutionServices(
 	context?: ExtensionContext,
 	api?: Pick<ExtensionAPI, "getAllTools">,
 	registeredSkills: () => Iterable<AssignedSkill> = () => [],
+	registeredContracts: () => Iterable<GraphRegisteredContract> = () => [],
 ): GraphExecutionServices {
 	const toolsByCwd = new Map<string, ToolMap>();
 
@@ -212,8 +214,24 @@ export function createGraphExecutionServices(
 		throw new Error(`Unsupported graph tool: ${request.tool}. Available: ${available.join(", ") || "none"}.`);
 	}
 
+	function contractFor(id: string) {
+		const matches = [...registeredContracts()].filter((entry) => entry.id === id);
+		if (matches.length > 1) throw new GraphControlFlowError(`Contract registration is ambiguous: ${id}`);
+		return matches[0];
+	}
+
 	return {
 		requiresProcessOwnership: true,
+		async validateRun(guard, run, signal) {
+			const validate = contractFor(guard)?.validateRun;
+			if (!validate) throw new GraphControlFlowError(`Run guard is not registered: ${guard}`);
+			try { await validate(run, context, signal); }
+			catch (error) {
+				if (signal?.aborted) throw signal.reason;
+				if (error instanceof GraphControlFlowError) throw error;
+				throw new GraphExecutionError(error instanceof Error ? error.message : String(error), "business");
+			}
+		},
 		async completePrompt(request) {
 			if (!context) throw new Error("Prompt node requires injectable GraphExecutionServices with an ExtensionContext.");
 			if (!request.prompt.trim()) throw new Error("Prompt node prompt was empty.");
@@ -263,7 +281,12 @@ export function createGraphExecutionServices(
 			}
 		},
 
-		async validateOutput(validator, output, signal) {
+		async validateOutput(validator, output, signal, run) {
+			const contract = contractFor(validator);
+			if (contract) {
+				if (!contract.validateOutput || !run) throw new GraphControlFlowError(`Output contract is unavailable: ${validator}`);
+				return contract.validateOutput(output, run, context, signal);
+			}
 			const validate = getGraphHostEnvironment()?.validateOutput;
 			if (!validate) throw new GraphControlFlowError(`Output validator is not registered: ${validator}`);
 			return validate(validator, output, context, signal);

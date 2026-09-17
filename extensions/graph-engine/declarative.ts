@@ -1,3 +1,4 @@
+import { mapNode } from "./nodes/map.ts";
 import { createHash } from "node:crypto";
 import Type from "typebox";
 import Value from "typebox/value";
@@ -177,6 +178,16 @@ const ParallelNodeSchema = Type.Object({
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
 }, { additionalProperties: false });
 
+const MapNodeSchema = Type.Object({
+	id: Type.String({ pattern: NODE_ID_PATTERN }), label: Type.Optional(Type.String({ minLength: 1 })),
+	type: Type.Literal("map"), itemsPath: Type.String({ minLength: 1 }),
+	templates: Type.Array(ParallelChildSchema, { minItems: 1, maxItems: 8 }),
+	maxItems: Type.Integer({ minimum: 1, maximum: 16 }),
+	minItems: Type.Optional(Type.Integer({ minimum: 0, maximum: 16 })),
+	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
+	next: Type.Optional(Type.String({ pattern: NODE_ID_PATTERN })),
+}, { additionalProperties: false });
+
 const DeclarativeGraphNodeSchema = Type.Union([
 	PromptNodeSchema,
 	SubagentNodeSchema,
@@ -184,10 +195,12 @@ const DeclarativeGraphNodeSchema = Type.Union([
 	ApprovalNodeSchema,
 	RouterNodeSchema,
 	ParallelNodeSchema,
+	MapNodeSchema,
 ]);
 
 export const DeclarativeGraphSpecSchema = Type.Object({
 	schemaVersion: Type.Union([Type.Literal(1), Type.Literal(2)]),
+	guard: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9._-]{0,127}$" })),
 	budget: Type.Optional(BudgetSchema),
 	name: Type.String({ pattern: GRAPH_NAME_PATTERN }),
 	version: Type.Optional(Type.String({ minLength: 1, default: "1.0.0" })),
@@ -281,16 +294,23 @@ export type DeclarativeParallelNode = {
 	concurrency?: number;
 	next?: string;
 };
+export type DeclarativeMapNode = {
+	id: string; type: "map"; label?: string; itemsPath: string;
+	templates: DeclarativeParallelNode["children"];
+	maxItems: number; minItems?: number; concurrency?: number; next?: string;
+};
 export type DeclarativeGraphNode =
 	| DeclarativePromptNode
 	| DeclarativeSubagentNode
 	| DeclarativeToolNode
 	| DeclarativeApprovalNode
 	| DeclarativeRouterNode
-	| DeclarativeParallelNode;
+	| DeclarativeParallelNode
+	| DeclarativeMapNode;
 export interface DeclarativeGraphSpec {
 	[key: string]: unknown;
 	schemaVersion: 1 | 2;
+	guard?: string;
 	budget?: GraphBudget;
 	name: string;
 	version: string;
@@ -423,6 +443,7 @@ export function allNodes(spec: DeclarativeGraphSpec): DeclarativeGraphNode[] {
 	for (const node of spec.nodes) {
 		nodes.push(node);
 		if (node.type === "parallel") nodes.push(...node.children);
+		if (node.type === "map") nodes.push(...node.templates);
 	}
 	return nodes;
 }
@@ -502,6 +523,7 @@ function declarativeCanReach(spec: DeclarativeGraphSpec, from: string, target: s
 
 function validateSemantic(spec: DeclarativeGraphSpec): void {
 	const issues: string[] = [];
+	if (spec.guard && spec.schemaVersion !== 2) issues.push(issue("guard", "guard requires schemaVersion 2"));
 	if (spec.budget && spec.schemaVersion !== 2) issues.push(issue("budget", "budget requires schemaVersion 2"));
 	for (const node of allNodes(spec)) {
 		if ("budget" in node && node.budget && spec.schemaVersion !== 2) issues.push(issue(node.id, "budget requires schemaVersion 2"));
@@ -556,8 +578,13 @@ function validateSemantic(spec: DeclarativeGraphSpec): void {
 			if ("to" in node.default && !graphNodeIds.has(node.default.to)) issues.push(issue(`${nodePath}.default.to`, `unknown default target: ${node.default.to}`));
 		}
 
-		if (node.type === "parallel") {
-			for (const [childIndex, child] of node.children.entries()) {
+		if (node.type === "map") {
+			if (spec.schemaVersion !== 2) issues.push(issue(nodePath, "map requires schemaVersion 2"));
+			if ((node.minItems ?? 0) > node.maxItems) issues.push(issue(nodePath, "map minItems exceeds maxItems"));
+			validatePathExpression(node.itemsPath, `${nodePath}.itemsPath`, issues);
+		}
+		if (node.type === "parallel" || node.type === "map") {
+			for (const [childIndex, child] of (node.type === "map" ? node.templates : node.children).entries()) {
 				const childPath = `${nodePath}.children[${childIndex}]`;
 				if ("failure" in child && child.failure) {
 					if (spec.schemaVersion !== 2) issues.push(issue(childPath, "parallel failure policy requires schemaVersion 2"));
@@ -762,6 +789,11 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 			},
 		});
 	}
+	if (node.type === "map") return mapNode({
+		id: node.id, label: node.label, items: (state) => readPath(state, node.itemsPath),
+		templates: node.templates.map(compileDeclarativeNode), maxItems: node.maxItems, minItems: node.minItems,
+		concurrency: node.concurrency, next: node.next,
+	});
 	const children = node.children.map((child) => compileDeclarativeNode(child));
 	return parallelNode({
 		id: node.id,
@@ -774,9 +806,10 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 
 function deriveCapability(node: DeclarativeGraphNode) {
 	if (node.type === "approval" || node.type === "router") return undefined;
-	if (node.type === "parallel") {
-		const tools = [...new Set(node.children.flatMap((child) => child.type === "tool" ? [child.tool] : child.type === "subagent" ? child.tools : []))].sort();
-		const skills = [...new Set(node.children.flatMap((child) => child.type === "subagent" ? child.skills ?? [] : []))].sort();
+	if (node.type === "parallel" || node.type === "map") {
+		const children = node.type === "map" ? node.templates : node.children;
+		const tools = [...new Set(children.flatMap((child) => child.type === "tool" ? [child.tool] : child.type === "subagent" ? child.tools : []))].sort();
+		const skills = [...new Set(children.flatMap((child) => child.type === "subagent" ? child.skills ?? [] : []))].sort();
 		return {
 			id: node.id,
 			description: node.label ?? `Run parallel node ${node.id}.`,
@@ -870,6 +903,7 @@ export function compileDeclarativeGraphSpec(value: unknown, options?: { sourcePa
 	});
 	const graph: RegisteredGraphDefinition = {
 		name: spec.name,
+		guard: spec.guard,
 		...(spec.schemaVersion === 2 ? { executionVersion: 2 as const, definitionHash: serialization.sha256 } : {}),
 		version: spec.version,
 		description: spec.description,

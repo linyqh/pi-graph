@@ -393,3 +393,23 @@ v2 项目检查点是恢复的权威记录：会话启动不以旧 JSONL 覆盖�
 所有调用、Pi 内循环、自动重试和输出修正共用累计预算。Graph 和叶子任务可分别配置；未指定项的默认值：256 次节点调用、1024 次可观测模型请求、1000 万 tokens、1000 USD（按 provider 报价）；Graph 1 小时、叶子任务 30 分钟。时间从首次开始计算，暂停和退避也占用，不在恢复时清零。生产业务图应显式收紧预算。
 
 请求计数基于 direct completion 和 Pi assistant-start 事件；tokens/费用按返回的 usage 累计，缺失费用无法精确计价。SDK 内不可见的 HTTP 重试不能逐次计数，并行在途请求可能产生短暂超额；单任务超额取消对应子进程；整次运行超额取消所有在途任务，截止时间也覆盖审批等待和路由。自定义执行服务必须传递 signal、报告 usage，不能把这一机制当成上游计费硬限额。
+
+### 受约束任务分发（1.7 候选版）
+
+`schemaVersion: 2` 可以声明单层 `map`，从 `itemsPath` 读取任务清单，并执行预声明的只读叶子模板：
+
+```json
+{
+  "id": "analysis", "type": "map", "itemsPath": "data.tasks",
+  "minItems": 0, "maxItems": 5, "concurrency": 3,
+  "templates": [{ "id": "explain", "type": "prompt", "prompt": "{{data.mapTask.input.question}}" }]
+}
+```
+
+输入示例：`[{"taskId":"growth","template":"explain","required":true,"input":{"question":"Explain the sealed growth evidence."}}]`。任务 ID 在批次内唯一；任务只能提供 `taskId/template/required/input/label`，不能提供代码、工具、Skill、路由或模型覆盖。最多 16 项、8 个模板，并发最多 4；每项 input 最大 64 KiB。批次先落盘再执行；恢复沿用已冻结清单和输入，复用已验证成功结果。新业务修订重新进入 map 时生成新批次。结果保留原任务顺序和可选失败；缺必需任务会阻断汇总。
+
+可信插件可通过 `pi-graph:contracts:request` / `pi-graph:contracts:register` 注册版本化契约（见 `extensions/graph-engine/contracts.ts`）。DSL 的 `guard` 在开始与恢复前执行；节点 `validation.validator` 接收原运行 context 与当前 nodeId。未注册或重复注册的契约拒绝执行。契约必须是只读检查并尊重取消信号；校验不能代替批准，也不能修改运行上下文。Graph 总期限包括首次守卫等待。
+
+投影 schema 仍为 1，新增可选 `execution`（v2 执行版本、恢复资格、累计消耗与预算）和节点 `task`（调用、修正、复用、下一次重试时间、验证反馈、失败类型、必需性）。旧记录可继续展示；v1 检查点不会被提升成 v2。
+
+Pi 集成接口核对：[Extension 文档](https://pi.dev/docs/latest/extensions)、[Package 文档](https://pi.dev/docs/latest/packages)。本地集成以 FPA 的 Pi SDK 0.85.1 为准。

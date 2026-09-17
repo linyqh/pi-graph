@@ -331,7 +331,7 @@ export interface ParallelNodeOptions {
 	next?: string;
 }
 
-async function mapWithConcurrency<TIn, TOut>(items: TIn[], concurrency: number, fn: (item: TIn) => Promise<TOut>): Promise<TOut[]> {
+export async function mapWithConcurrency<TIn, TOut>(items: TIn[], concurrency: number, fn: (item: TIn) => Promise<TOut>): Promise<TOut[]> {
 	const results: TOut[] = new Array(items.length);
 	let nextIndex = 0;
 	let failed = false;

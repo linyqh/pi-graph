@@ -111,7 +111,11 @@ export interface GraphOutputValidation {
 	maxCorrections?: number;
 }
 
+export interface GraphMapTask { taskId: string; template: string; input: JsonObject; required: boolean; label?: string }
+export interface GraphTaskBatch { id: string; tasks: GraphMapTask[]; data: JsonObject; hash: string }
+
 export interface GraphTaskRecord {
+	reusedCount?: number;
 	inputHash: string;
 	usage?: GraphUsage;
 	deadlineAt?: number;
@@ -126,6 +130,7 @@ export interface GraphTaskRecord {
 }
 
 export interface GraphState {
+	batches?: Record<string, GraphTaskBatch>;
 	tasks?: Record<string, GraphTaskRecord>;
 	usage?: GraphUsage;
 	deadlineAt?: number;
@@ -154,6 +159,7 @@ export interface GraphState {
 }
 
 export interface GraphNodeContext {
+	prepareTaskBatch?(items: () => unknown): GraphTaskBatch;
 	/** Process ownership supplied by the runtime store. */
 	spawnProcess?: GraphExecutionLease["spawnProcess"];
 	reportUsage?: (usage: Partial<GraphUsage>) => void;
@@ -201,6 +207,7 @@ export interface GraphNodeCapabilities {
 }
 
 export interface GraphNode {
+	map?: { maxItems: number; minItems: number };
 	id: string;
 	type: string;
 	label?: string;
@@ -233,6 +240,7 @@ export interface GraphApprovalBinding {
 }
 
 export interface GraphDefinition {
+	guard?: string;
 	executionVersion?: 1 | 2;
 	budget?: GraphBudget;
 	name: string;
@@ -268,6 +276,7 @@ export interface GraphCheckpointEnvelope {
 export type GraphRunProjectionEdgeKind = "transition" | "branch" | "loop" | "parallel";
 
 export interface GraphRunProjectionNode {
+	task?: { attempts: number; corrections: number; reusedCount: number; feedback?: string; nextRetryAt?: number; errorKind?: string; required?: boolean; usage?: GraphUsage };
 	id: string;
 	parentId?: string;
 	label: string;
@@ -295,6 +304,7 @@ export interface GraphRunProjectionEdge {
 }
 
 export interface GraphRunProjection {
+	execution?: { version: 2; resumable: boolean; deadlineAt?: number; usage?: GraphUsage; budget?: GraphBudget };
 	kind: typeof GRAPH_RUN_PROJECTION_KIND;
 	schemaVersion: typeof GRAPH_RUN_PROJECTION_SCHEMA_VERSION;
 	revision: number;
@@ -361,10 +371,13 @@ export interface GraphExecutionOutput {
 	meta: JsonObject;
 }
 
+export interface GraphValidationContext { graphName: string; cwd: string; context: GraphRunContext; phase: "start" | "resume" | "output"; nodeId?: string }
+
 export interface GraphExecutionServices {
+	validateRun?(guard: string, run: GraphValidationContext, signal?: AbortSignal): Promise<void>;
 	/** Default Pi services require local process ownership for durable execution. */
 	requiresProcessOwnership?: boolean;
-	validateOutput?(validator: string, output: unknown, signal?: AbortSignal): Promise<{ valid: boolean; feedback?: string; blocked?: boolean }>;
+	validateOutput?(validator: string, output: unknown, signal?: AbortSignal, run?: GraphValidationContext): Promise<{ valid: boolean; feedback?: string; blocked?: boolean }>;
 	completePrompt(request: GraphPromptRequest): Promise<GraphExecutionOutput>;
 	runSubagent(request: GraphSubagentRequest): Promise<GraphExecutionOutput>;
 	invokeTool(request: GraphToolRequest): Promise<GraphExecutionOutput>;

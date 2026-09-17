@@ -165,7 +165,7 @@ function validateNode(
 		for (const message of outputSchemaIssues(node.validation.schema)) issues.push({ path, message });
 	}
 	if (node.budget) {
-		if (node.type === "parallel") issues.push({ path, message: "Set budgets on the graph or leaf tasks, not a parallel group" });
+		if (node.type === "parallel" || node.type === "map") issues.push({ path, message: "Set budgets on the graph or leaf tasks, not a parallel group" });
 		validateBudget(node.budget, executionVersion, path, issues);
 	}
 
@@ -173,6 +173,11 @@ function validateNode(
 		issues.push({ path: `${path}.routerCandidates`, message: "router nodes must declare every candidate target" });
 	}
 
+	if (node.type === "map") {
+		if (executionVersion !== 2 || !node.map || !Number.isInteger(node.map.maxItems) || node.map.maxItems < 1 || node.map.maxItems > 16
+			|| !Number.isInteger(node.map.minItems) || node.map.minItems < 0 || node.map.minItems > node.map.maxItems) issues.push({ path, message: "invalid v2 map bounds" });
+		if (node.children?.some((child) => !["prompt", "subagent", "tool"].includes(child.type))) issues.push({ path, message: "map templates must be read-only leaf nodes" });
+	}
 	if (node.type === "parallel" || node.children || node.concurrency !== undefined) {
 		if (!node.children || node.children.length === 0) {
 			issues.push({ path: `${path}.children`, message: "parallel nodes must declare at least one child node" });
@@ -213,6 +218,7 @@ function validateBudget(budget: import("./types.ts").GraphBudget, version: numbe
 
 export function validateGraph(graph: GraphDefinition): GraphValidationResult {
 	const issues: GraphValidationIssue[] = [];
+	if (graph.guard && (graph.executionVersion !== 2 || !/^[a-z][a-z0-9._-]{0,127}$/.test(graph.guard))) issues.push({ path: "guard", message: "guard requires a versioned registered v2 contract" });
 	if (graph.budget) validateBudget(graph.budget, graph.executionVersion ?? 1, "budget", issues);
 
 	if (!isNonEmptyString(graph.name)) {
@@ -254,11 +260,11 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
 	if (entries.length === 0) {
 		issues.push({ path: "nodes", message: "graph must define at least one node" });
 	}
-	const projectionNodeCount = flattenGraphNodes(graph).length;
+	const projectionNodeCount = flattenGraphNodes(graph).length + Object.values(graph.nodes).reduce((extra, node) => extra + (node.type === "map" ? Math.max(0, (node.map?.maxItems ?? 0) - (node.children?.length ?? 0)) : 0), 0);
 	if (projectionNodeCount > GRAPH_RUN_PROJECTION_MAX_NODES) {
 		issues.push({ path: "nodes", message: `graph may expose at most ${GRAPH_RUN_PROJECTION_MAX_NODES} nodes including parallel children` });
 	}
-	const projectionEdgeCount = countGraphProjectionEdges(graph);
+	const projectionEdgeCount = countGraphProjectionEdges(graph) + Object.values(graph.nodes).reduce((extra, node) => extra + (node.type === "map" ? Math.max(0, (node.map?.maxItems ?? 0) - (node.children?.length ?? 0)) * 2 : 0), 0);
 	if (projectionEdgeCount > GRAPH_RUN_PROJECTION_MAX_EDGES) {
 		issues.push({ path: "transitions", message: `graph may expose at most ${GRAPH_RUN_PROJECTION_MAX_EDGES} edges` });
 	}

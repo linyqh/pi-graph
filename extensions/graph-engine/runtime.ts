@@ -1,3 +1,4 @@
+import { prepareTaskBatch } from "./task-batch.ts";
 import Value from "typebox/value";
 import { boundedExecutionValue } from "./output-contract.ts";
 import { GraphExecutionError, executionErrorKind, retryDelay, waitForRetry } from "./execution-policy.ts";
@@ -302,6 +303,7 @@ async function executeNode(
 		pi,
 		graph,
 		state,
+		prepareTaskBatch: (items) => prepareTaskBatch(node, observableState, items, (next) => persist(services, next)),
 		spawnProcess: options.spawnProcess,
 		feedback: observableState.tasks?.[node.id]?.feedback,
 		reportUsage: state.schemaVersion === 2 ? (usage) => recordUsage(services, graph, node, observableState, usage) : undefined,
@@ -336,6 +338,10 @@ async function executeNode(
 			const cached = observableState.tasks?.[childNode.id];
 			if (inputHash && cached?.inputHash === inputHash && cached.result !== undefined) {
 				if (hashJson(cached.result) !== cached.resultHash) throw new GraphControlFlowError(`Corrupt saved result for ${childNode.id}.`);
+				cached.reusedCount = (cached.reusedCount ?? 0) + 1;
+				observableState.updatedAt = runtimeNow(services);
+				observableState.history.push(makeEvent(services, childNode.id, "checkpoint", { message: "Reused verified saved result." }));
+				persist(services, observableState);
 				emitUpdate(services, observableState, `Reusing completed ${childNode.label ?? childNode.id}.`);
 				return copyJson(cached.result);
 			}
@@ -480,7 +486,7 @@ async function executeDurableNode(
 					} else if (node.validation.validator) {
 						const validate = (options.services ?? createGraphExecutionServices(options.extensionContext, pi)).validateOutput;
 						if (!validate) throw new GraphControlFlowError(`Output validator is not registered: ${node.validation.validator}`);
-						const verdict = await validate(node.validation.validator, result.output, signal);
+						const verdict = await validate(node.validation.validator, result.output, signal, { graphName: graph.name, cwd: state.cwd, context: state.context ?? {}, phase: "output", nodeId: node.id });
 						if (signal.aborted) throw signal.reason;
 						if (verdict.blocked) throw new GraphExecutionError(verdict.feedback ?? "Business validation blocked.", "business");
 						if (!verdict.valid) feedback = verdict.feedback?.trim() || "Output validator rejected the result.";
@@ -840,6 +846,13 @@ async function executeState(
 
 			// A business loop entering the parallel group again is a new batch, not a resume.
 			if (state.schemaVersion === 2 && !resumingCurrent) {
+				if (node.type === "map") {
+					for (const task of state.batches?.[node.id]?.tasks ?? []) {
+						delete state.tasks?.[`${node.id}:${task.taskId}`];
+						delete state.nodes[`${node.id}:${task.taskId}`];
+					}
+					delete state.batches?.[node.id];
+				}
 				delete state.tasks?.[node.id];
 				for (const child of node.children ?? []) delete state.tasks?.[child.id];
 			}
@@ -959,6 +972,19 @@ async function executeState(
 	return resultFor(graph, state);
 }
 
+/** Contracts are read-only checks; a non-cooperative check cannot hold execution forever. */
+async function validateGuardWithinDeadline(validate: () => Promise<void>, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) throw signal.reason;
+	let onAbort: (() => void) | undefined;
+	try {
+		await Promise.race([validate(), new Promise<never>((_resolve, reject) => {
+			onAbort = () => reject(signal?.reason);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
+		})]);
+	} finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+}
+
 export async function runGraph(
 	pi: ExtensionAPI,
 	graph: GraphDefinition,
@@ -990,15 +1016,25 @@ export async function runGraph(
 			const current = options.runStore.readCheckpoint(options.resumeFrom.runId);
 			if (!current || hashJson(current) !== hashJson(options.resumeFrom)) throw new GraphControlFlowError("Resume checkpoint is stale or missing from the owned project run store.");
 		}
+		const executionDeadline = options.resumeFrom?.deadlineAt ?? runtimeNow(services) + (graph.budget?.timeoutMs ?? 3600000);
 		if (controller) {
 			resolvedOptions.signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
-			if (options.resumeFrom) budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, (options.resumeFrom.deadlineAt ?? 0) - runtimeNow(services)));
+			budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, executionDeadline - runtimeNow(services)));
+		}
+		if (graph.guard) {
+			const validate = resolvedOptions.services?.validateRun;
+			if (!validate) throw new GraphControlFlowError(`Run guard is not registered: ${graph.guard}`);
+			await validateGuardWithinDeadline(() => validate(graph.guard!, { graphName: graph.name, cwd: options.cwd,
+				context: validateGraphRunContext(options.resumeFrom?.context ?? options.context),
+				phase: options.resumeFrom ? "resume" : "start" }, resolvedOptions.signal), resolvedOptions.signal);
+			if (resolvedOptions.signal?.aborted) throw resolvedOptions.signal.reason;
 		}
 		state = await createRunnableState(graph, resolvedOptions, services);
 		if (state.status !== "running") return resultFor(graph, state);
 		if (controller) {
 			budgetControllerByState.set(state, controller);
-			if (!options.resumeFrom) budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, state.deadlineAt! - runtimeNow(services)));
+			state.deadlineAt = executionDeadline;
+			persist(services, state);
 		}
 		return await executeState(pi, services, graph, state, resolvedOptions);
 	} finally {
