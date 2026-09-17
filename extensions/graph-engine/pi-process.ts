@@ -1,4 +1,4 @@
-import type { GraphUsage } from "./types.ts";
+import type { GraphUsage, GraphExecutionLease } from "./types.ts";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -11,6 +11,7 @@ import { getGraphHostEnvironment, graphChildProcessEnv } from "./host-bridge.ts"
 const MAX_CAPTURED_STDERR = 50 * 1024;
 
 export interface PiPromptOptions {
+	spawnProcess?: GraphExecutionLease["spawnProcess"];
 	reportUsage?: (usage: Partial<GraphUsage>) => void;
 	prompt: string;
 	cwd: string;
@@ -29,6 +30,7 @@ export interface PiPromptOptions {
 }
 
 export interface PiPromptResult {
+	errorOrigin?: "model" | "child";
 	exitCode: number;
 	stderr: string;
 	finalText: string;
@@ -214,7 +216,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 		};
 
 		result.exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn(invocation.command, invocation.args, {
+			const create = () => spawn(invocation.command, invocation.args, {
 				cwd: options.cwd,
 				env: {
 					...(prepared?.env ?? childEnv),
@@ -223,6 +225,8 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+
+			const proc = options.spawnProcess ? options.spawnProcess(create) : create();
 
 			let buffer = "";
 			let killTimer: NodeJS.Timeout | undefined;
@@ -246,6 +250,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				if (event.type === "graph_child_error") {
 					result.stopReason = "error";
 					result.errorMessage = String(event.message);
+					result.errorOrigin = "child";
 				}
 				if (event.type === "session" && typeof event.id === "string") {
 					result.sessionId = event.id;
@@ -271,7 +276,10 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 						}
 						if (message.model) result.model = message.model;
 						if (message.stopReason) result.stopReason = message.stopReason;
-						if (message.errorMessage) result.errorMessage = message.errorMessage;
+						if (message.errorMessage) {
+							result.errorMessage = message.errorMessage;
+							if (result.errorOrigin !== "child") result.errorOrigin = "model";
+						}
 					}
 				}
 			};
@@ -316,6 +324,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				if (event.type === "graph_child_error") {
 					result.stopReason = "error";
 					result.errorMessage = String(event.message);
+					result.errorOrigin = "child";
 				}
 			} catch { /* Ordinary CLI diagnostics are retained as stderr. */ }
 		}

@@ -4,7 +4,7 @@ import { GraphExecutionError, executionErrorKind, retryDelay, waitForRetry } fro
 import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
-	GraphBudget, GraphUsage,
+	GraphBudget, GraphUsage, GraphExecutionLease,
 	GraphCheckpointEntry,
 	GraphCheckpointEnvelope,
 	GraphDefinition,
@@ -26,6 +26,7 @@ import { assertValidGraph } from "./validation.ts";
 import { flattenGraphNodes, projectGraphRunView } from "./view-projection.ts";
 
 const activeRunByCwd = new Map<string, string>();
+const budgetControllerByState = new WeakMap<GraphState, AbortController>();
 
 function now(): number {
 	return Date.now();
@@ -188,7 +189,7 @@ function emitUpdate(services: GraphRuntimeServices, state: GraphState, message?:
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
-	if (signal?.aborted) return true;
+	if (signal?.aborted) return !(signal.reason instanceof GraphExecutionError && signal.reason.kind === "budget");
 	if (!(error instanceof Error)) return false;
 	return error.name === "AbortError";
 }
@@ -300,6 +301,7 @@ async function executeNode(
 		pi,
 		graph,
 		state,
+		spawnProcess: options.spawnProcess,
 		feedback: observableState.tasks?.[node.id]?.feedback,
 		reportUsage: state.schemaVersion === 2 ? (usage) => recordUsage(services, graph, node, observableState, usage) : undefined,
 		cwd: options.cwd,
@@ -408,8 +410,17 @@ function assertUsageBudget(usage: GraphUsage, budget: GraphBudget | undefined, b
 	}
 }
 
+function assertRunUsageBudget(state: GraphState, budget: GraphBudget | undefined, beforeInvocation: boolean): void {
+	try {
+		assertUsageBudget(state.usage ?? emptyUsage(), budget, beforeInvocation);
+	} catch (error) {
+		budgetControllerByState.get(state)?.abort(error);
+		throw error;
+	}
+}
+
 function checkBudget(graph: GraphDefinition, node: GraphNode, state: GraphState, time: number): void {
-	assertUsageBudget(state.usage ?? emptyUsage(), graph.budget, true);
+	assertRunUsageBudget(state, graph.budget, true);
 	const task = state.tasks?.[node.id];
 	assertUsageBudget(task?.usage ?? emptyUsage(), node.budget, true);
 	if (time >= (state.deadlineAt ?? Infinity) || time >= (task?.deadlineAt ?? Infinity)) throw new GraphExecutionError("Execution time budget exhausted.", "budget");
@@ -426,7 +437,7 @@ function recordUsage(services: GraphRuntimeServices, graph: GraphDefinition, nod
 		task.usage[key] += amount;
 	}
 	persist(services, state);
-	assertUsageBudget(state.usage, graph.budget, false);
+	assertRunUsageBudget(state, graph.budget, false);
 	assertUsageBudget(task.usage, node.budget, false);
 }
 
@@ -471,7 +482,7 @@ async function executeDurableNode(
 						const verdict = await validate(node.validation.validator, result.output, signal);
 						if (signal.aborted) throw signal.reason;
 						if (verdict.blocked) throw new GraphExecutionError(verdict.feedback ?? "Business validation blocked.", "business");
-						if (!verdict.valid) feedback = verdict.feedback ?? "Output validator rejected the result.";
+						if (!verdict.valid) feedback = verdict.feedback?.trim() || "Output validator rejected the result.";
 					}
 					if (feedback) {
 						record = observable.tasks![node.id];
@@ -707,7 +718,7 @@ async function executeNodeWithPolicy(
 	const maxAttempts = state.schemaVersion === 2 ? 1 : node.failure?.maxAttempts ?? 1;
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-		if (options.signal?.aborted) throw new Error("Graph run was aborted.");
+		if (options.signal?.aborted) throw options.signal.reason ?? new Error("Graph run was aborted.");
 		claimStep();
 
 		const startedAt = runtimeNow(services);
@@ -816,7 +827,8 @@ async function executeState(
 		persist(services, state);
 		emitUpdate(services, state, options.resumeFrom ? `Graph ${graph.name} resumed.` : `Graph ${graph.name} started.`);
 		while (state.status === "running") {
-			if (options.signal?.aborted) throw new Error("Graph run was aborted.");
+			if (state.schemaVersion === 2 && runtimeNow(services) >= (state.deadlineAt ?? 0)) throw new GraphExecutionError("Graph time budget exhausted.", "budget");
+			if (options.signal?.aborted) throw options.signal.reason ?? new Error("Graph run was aborted.");
 			if (!state.currentNode) throw new Error("Graph has no current node.");
 
 			const node = graph.nodes[state.currentNode];
@@ -950,6 +962,9 @@ export async function runGraph(
 	options: GraphRunOptions,
 ): Promise<GraphRunResult> {
 	assertValidGraph(graph);
+	if (graph.executionVersion === 2 && !options.services && !options.runStore?.acquireExecutionLease) {
+		throw new GraphControlFlowError("Durable v2 execution requires a trusted workspace run store with process ownership.");
+	}
 	const resolvedOptions: GraphRunOptions = {
 		...options,
 		services: options.services ?? createGraphExecutionServices(options.extensionContext),
@@ -960,11 +975,25 @@ export async function runGraph(
 	activeRunByCwd.set(options.cwd, claimId);
 
 	let state: GraphState | undefined;
+	let lease: GraphExecutionLease | undefined;
+	let budgetTimer: ReturnType<typeof setTimeout> | undefined;
 	try {
+		if (graph.executionVersion === 2 && options.runStore?.acquireExecutionLease) {
+			lease = options.runStore.acquireExecutionLease();
+			resolvedOptions.spawnProcess = lease.spawnProcess;
+		}
 		state = await createRunnableState(graph, resolvedOptions, services);
 		if (state.status !== "running") return resultFor(graph, state);
+		if (state.schemaVersion === 2) {
+			const controller = new AbortController();
+			budgetControllerByState.set(state, controller);
+			resolvedOptions.signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+			budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, state.deadlineAt! - runtimeNow(services)));
+		}
 		return await executeState(pi, services, graph, state, resolvedOptions);
 	} finally {
+		clearTimeout(budgetTimer);
+		if (state) budgetControllerByState.delete(state);
 		if (activeRunByCwd.get(options.cwd) === claimId) {
 			activeRunByCwd.delete(options.cwd);
 		}
@@ -973,6 +1002,7 @@ export async function runGraph(
 		} catch {
 			// UI cleanup is observational and must not change a run result.
 		}
+		lease?.release();
 	}
 }
 
@@ -1005,19 +1035,26 @@ export function interruptOrphanedGraphRuns(
 		const graph = options.graphForName?.(state.graphName);
 		const services = resolveRuntimeServices(pi, graph, {
 			goal: "",
+			runStore: options.runStore,
 			cwd: options.cwd,
 			ui: options.ui,
 			onUpdate: options.onUpdate,
 		});
-		const next = copyJson(state);
-		next.status = "interrupted";
-		if (next.currentNode && next.nodes[next.currentNode]) {
-			next.nodes[next.currentNode] = { ...next.nodes[next.currentNode], status: "interrupted" };
-		}
-		next.updatedAt = runtimeNow(services);
-		next.completedAt = next.updatedAt;
-		persist(services, next);
-		interrupted.push(next);
+		const lease = state.schemaVersion === 2 ? options.runStore?.acquireExecutionLease?.() : undefined;
+		try {
+			const next = copyJson(state);
+			next.status = "interrupted";
+			if (state.schemaVersion === 2) {
+				for (const status of Object.values(next.nodes)) if (status.status === "running") status.status = "interrupted";
+			}
+			if (next.currentNode && next.nodes[next.currentNode]) {
+				next.nodes[next.currentNode] = { ...next.nodes[next.currentNode], status: "interrupted" };
+			}
+			next.updatedAt = runtimeNow(services);
+			next.completedAt = next.updatedAt;
+			persist(services, next);
+			interrupted.push(next);
+		} finally { lease?.release(); }
 	}
 
 	return interrupted;

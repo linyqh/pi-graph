@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { compileDeclarativeGraphSpec } from "../extensions/graph-engine/declarative.ts";
 import { resumeGraph, runGraph } from "../extensions/graph-engine/runtime.ts";
 import type { GraphExecutionServices, GraphState } from "../extensions/graph-engine/types.ts";
+import { createGraphExecutionServices } from "../extensions/graph-engine/services.ts";
 import { GraphExecutionError } from "../extensions/graph-engine/execution-policy.ts";
 
 const pi = { appendEntry() {} } as unknown as ExtensionAPI;
@@ -53,7 +54,7 @@ test("v2 retries a transient parallel failure without rerunning successful sibli
 	const calls: Record<string, number> = {};
 	const result = await runGraph(pi, graph, { goal: "plan", cwd: "/durable-retry", services: services(async (name) => {
 		calls[name] = (calls[name] ?? 0) + 1;
-		if (name === "efficiency" && calls[name] < 3) throw new Error("Our servers are currently overloaded. Please try again later.");
+		if (name === "efficiency" && calls[name] < 3) throw new GraphExecutionError("Our servers are currently overloaded. Please try again later.", "transient");
 		return name;
 	}) });
 	assert.equal(result.status, "completed", result.state.error);
@@ -270,4 +271,75 @@ test("v2 reports observed model usage cumulatively across failed attempts", asyn
 	assert.deepEqual(first.state.usage, { invocations: 2, requests: 2, tokens: 10, cost: 0.02 });
 	await resumeGraph(pi, graph, first.state, { cwd: "/durable-usage", services: execution });
 	assert.equal(calls, 2);
+});
+
+test("v2 shared run budget aborts every in-flight sibling", async () => {
+	const spec: any = specification();
+	spec.budget = { maxTokens: 10 };
+	const execution = services(async (name) => name);
+	const cancelled: string[] = [];
+	execution.completePrompt = async (request) => {
+		if (request.prompt === "efficiency") {
+			await new Promise((resolve) => setImmediate(resolve));
+			request.reportUsage!({ tokens: 11 });
+		} else await new Promise<void>((_resolve, reject) => {
+			request.signal!.addEventListener("abort", () => { cancelled.push(request.prompt); reject(request.signal!.reason); }, { once: true });
+		});
+		return { output: request.prompt, text: request.prompt, meta: {} };
+	};
+	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-shared-cancel", services: execution });
+	assert.equal(result.status, "failed");
+	assert.match(result.state.error!, /tokens budget/);
+	assert.deepEqual(cancelled.sort(), ["growth", "risk"]);
+});
+
+test("v2 rejects negative validator verdicts even with empty feedback", async () => {
+	const spec: any = specification();
+	spec.nodes[0].children[0].validation = { schema: { type: "string" }, validator: "empty", maxCorrections: 0 };
+	const execution = services(async (name) => name);
+	execution.validateOutput = async () => ({ valid: false, feedback: "" });
+	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-empty-feedback", services: execution });
+	assert.equal(result.status, "failed");
+	assert.match(result.state.error!, /validator rejected/);
+});
+
+test("v2 expired graph cannot complete through a synchronous router", async () => {
+	const spec: any = specification();
+	spec.start = "route";
+	spec.nodes = [{ id: "route", type: "router", path: "data.mode", cases: [{ equals: "done", done: true }], default: { done: true } }];
+	const graph = compileDeclarativeGraphSpec(spec);
+	const first = await runGraph(pi, graph, { goal: "plan", cwd: "/durable-expired-router", services: services(async (name) => name) });
+	first.state.status = "failed";
+	first.state.currentNode = "route";
+	first.state.deadlineAt = 1;
+	const resumed = await resumeGraph(pi, graph, first.state, { cwd: "/durable-expired-router", services: services(async (name) => name) });
+	assert.equal(resumed.status, "failed");
+	assert.match(resumed.state.error!, /time budget/);
+});
+
+test("v2 graph deadline dismisses approval without recording a decision", async () => {
+	const spec: any = specification();
+	spec.budget = { timeoutMs: 20 };
+	spec.start = "approve";
+	spec.nodes = [{ id: "approve", type: "approval", title: "Approve?", message: "x", yes: "done" }, { id: "done", type: "prompt", prompt: "done" }];
+	let dismissed = false;
+	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-approval-timeout", services: services(async (name) => name),
+		ui: { confirm: async (_title: string, _message: string, options: { signal: AbortSignal }) => new Promise<boolean>((resolve) => {
+			options.signal.addEventListener("abort", () => { dismissed = true; resolve(false); }, { once: true });
+		}) } as any,
+	});
+	assert.equal(result.status, "failed");
+	assert.equal(dismissed, true);
+	assert.equal(result.state.approvals.length, 0);
+	assert.equal(result.state.nodes.done.status, "pending");
+});
+
+test("v2 configuration errors containing provider keywords are never retried", async () => {
+	const spec: any = specification();
+	spec.nodes[0].children = [{ id: "bad", type: "tool", tool: "ECONNRESET", args: {}, failure: { maxAttempts: 3, initialDelayMs: 1 } }];
+	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-tool-config", services: createGraphExecutionServices() });
+	assert.equal(result.status, "failed");
+	assert.match(result.state.error!, /Unsupported graph tool/);
+	assert.equal(result.state.tasks!.bad.attempts, 1);
+	assert.equal(result.state.history.filter((event) => event.type === "retry").length, 0);
 });

@@ -1,3 +1,4 @@
+import { acquireExecutionLease } from "./execution-lease.ts";
 import {
 	closeSync,
 	constants,
@@ -148,6 +149,10 @@ export class ProjectGraphRunStore implements GraphRunStore {
 			}
 			throw error;
 		}
+	}
+
+	acquireExecutionLease() {
+		return acquireExecutionLease(ensureRunsDirectoryWritable(this.cwd));
 	}
 
 	async load(): Promise<LoadGraphRunsResult> {

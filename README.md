@@ -350,6 +350,7 @@ Validation failures are marked as actual Pi tool errors. Broken-link diagnostics
   "description": "独立分析并保存结果",
   "mutationPolicy": "read-only",
   "start": "analyze",
+  "maxSteps": 8,
   "budget": { "maxInvocations": 12, "maxRequests": 32, "maxTokens": 100000, "maxCost": 5, "timeoutMs": 1800000 },
   "nodes": [{
     "id": "analyze", "type": "parallel", "concurrency": 2,
@@ -375,9 +376,13 @@ Validation failures are marked as actual Pi tool errors. Broken-link diagnostics
 - 首次终止失败后停止派发新任务；已启动任务收尾并保存，各分支立即发出状态更新。取消传播到子 Pi 进程，先 SIGTERM，5 秒后仍未退出则 SIGKILL，等待进程退出。
 - v2 模型/工具返回值和下游数据保持完整，显示文本仍截断。单个执行值上限 4 MiB、运行快照沿用 16 MiB；超限明确失败，大工件由工具保存到工作区并返回引用，本批不新增自动工件存储协议。
 
+项目运行存储额外使用 `.execution-owner` 和 `.execution-guard` 保护同机进程所有权。恢复前确认旧宿主和已登记 Pi 子进程均已退出；仍存活时拒绝新执行，不自动杀死可能被复用 PID 指向的进程。创建子进程与登记 PID 由同一临界区保护。极端崩溃若留下 guard，则明确阻塞，需运维核实旧进程退出后清理，不能自动过期抢占。正常完成自动释放所有权。
+
+默认服务的 v2 执行要求可信工作区的运行存储；自定义注入服务用于测试或宿主集成，须提供等效的持久化、进程所有权和取消保证。本地所有权协议不支持多机器共享存储。
+
 ### 三种循环和预算
 
-`failure.maxAttempts` 控制一次执行/显式恢复中的基础设施重试，默认 1；只重试结构化 `GraphExecutionError(kind="transient")` 及集中适配的明确过载、限流、临时网络错误。指数退避带抖动，默认 2 秒起、60 秒封顶，并尊重有效的 `retryAfterMs`。未知错误、权限错误和业务阻塞不自动重试。修改型节点保持禁止自动重复执行。
+`failure.maxAttempts` 控制一次执行/显式恢复中的基础设施重试，默认 1；只重试结构化 `GraphExecutionError(kind="transient")` 及模型/provider 边界集中适配的明确过载、限流、临时网络错误。指数退避带抖动，默认 2 秒起、60 秒封顶，并尊重有效的 `retryAfterMs`。未知错误、权限错误和业务阻塞不自动重试。修改型节点保持禁止自动重复执行。
 
 `validation` 仅用于只读 prompt/subagent；自动要求 JSON。schema 支持 type、properties、required、additionalProperties（布尔）、items、enum、const、minimum/maximum、min/maxLength、min/maxItems、description，最大嵌套 12 层；不支持远程引用或可执行校验。可选 `validator` 是宿主注册的版本化名称，经 `GraphHostEnvironment.validateOutput` 或注入服务解析。验证器必须响应 AbortSignal；返回 `blocked: true` 为业务阻塞，其余无效结果可反馈修正。未注册名称必须拒绝，不能当作通过。
 
@@ -385,4 +390,4 @@ Validation failures are marked as actual Pi tool errors. Broken-link diagnostics
 
 所有调用、Pi 内循环、自动重试和输出修正共用累计预算。Graph 和叶子任务可分别配置；未指定项的默认值：256 次节点调用、1024 次可观测模型请求、1000 万 tokens、1000 USD（按 provider 报价）；Graph 1 小时、叶子任务 30 分钟。时间从首次开始计算，暂停和退避也占用，不在恢复时清零。生产业务图应显式收紧预算。
 
-请求计数基于 direct completion 和 Pi assistant-start 事件；tokens/费用按返回的 usage 累计，缺失费用无法精确计价。SDK 内不可见的 HTTP 重试不能逐次计数，并行在途请求可能产生短暂超额；超额被观测后停止继续调用并取消对应子进程。自定义执行服务必须传递 signal、报告 usage，不能把这一机制当成上游计费硬限额。
+请求计数基于 direct completion 和 Pi assistant-start 事件；tokens/费用按返回的 usage 累计，缺失费用无法精确计价。SDK 内不可见的 HTTP 重试不能逐次计数，并行在途请求可能产生短暂超额；单任务超额取消对应子进程；整次运行超额取消所有在途任务，截止时间也覆盖审批等待和路由。自定义执行服务必须传递 signal、报告 usage，不能把这一机制当成上游计费硬限额。

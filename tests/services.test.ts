@@ -329,3 +329,10 @@ test("durable model results stay exact while display text remains bounded", asyn
 	const oversized = createGraphExecutionServices(modelContext(async () => assistant("x".repeat(4 * 1024 * 1024))));
 	await assert.rejects(oversized.completePrompt({ prompt: "x", cwd: "/workspace", preserveOutput: true }), /exceeds 4 MiB/);
 });
+
+test("only provider failures are adapted as transient infrastructure errors", async () => {
+	const services = createGraphExecutionServices(modelContext(async () => {
+		throw new Error("Our servers are currently overloaded. Please try again later.");
+	}));
+	await assert.rejects(services.completePrompt({ prompt: "x", cwd: "/workspace" }), (error: any) => error.kind === "transient");
+});

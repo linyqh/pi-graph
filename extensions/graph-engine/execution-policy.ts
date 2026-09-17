@@ -15,11 +15,17 @@ export class GraphExecutionError extends Error {
 
 export function executionErrorKind(error: unknown): ExecutionErrorKind {
 	if (error instanceof GraphExecutionError) return error.kind;
-	if (!(error instanceof Error)) return "unknown";
-	// Legacy provider adaptation is deliberately narrow. Business/tool errors do
-	// not become retryable merely because they contain the word "timeout".
-	if (/Our servers are currently overloaded|rate limit exceeded|too many requests|ECONNRESET|EAI_AGAIN/i.test(error.message)) return "transient";
 	return "unknown";
+}
+
+/** Called only at the provider boundary, never on tool/configuration diagnostics. */
+export function providerExecutionError(error: unknown): Error {
+	if (error instanceof GraphExecutionError) return error;
+	const message = error instanceof Error ? error.message : String(error);
+	if (/Our servers are currently overloaded|rate limit exceeded|too many requests|ECONNRESET|EAI_AGAIN/i.test(message)) {
+		return new GraphExecutionError(message, "transient");
+	}
+	return error instanceof Error ? error : new Error(message);
 }
 
 export function retryDelay(policy: GraphNodeFailurePolicy | undefined, attempt: number, error: unknown): number {

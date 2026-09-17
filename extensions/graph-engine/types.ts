@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type JsonObject = Record<string, unknown>;
@@ -153,6 +154,8 @@ export interface GraphState {
 }
 
 export interface GraphNodeContext {
+	/** Process ownership supplied by the runtime store. */
+	spawnProcess?: GraphExecutionLease["spawnProcess"];
 	reportUsage?: (usage: Partial<GraphUsage>) => void;
 	feedback?: string;
 	pi: ExtensionAPI;
@@ -324,6 +327,8 @@ export interface GraphRunProjection {
 export type GraphToolName = string;
 
 export interface GraphPromptRequest {
+	/** Process ownership supplied by the runtime store. */
+	spawnProcess?: GraphExecutionLease["spawnProcess"];
 	preserveOutput?: boolean;
 	reportUsage?: (usage: Partial<GraphUsage>) => void;
 	prompt: string;
@@ -365,6 +370,8 @@ export interface GraphExecutionServices {
 }
 
 export interface GraphRunOptions {
+	/** Process ownership supplied by the runtime store. */
+	spawnProcess?: GraphExecutionLease["spawnProcess"];
 	goal: string;
 	cwd: string;
 	input?: JsonObject;
@@ -380,7 +387,13 @@ export interface GraphRunOptions {
 	runStore?: GraphRunStore;
 }
 
+export interface GraphExecutionLease {
+	spawnProcess<T extends ChildProcess>(create: () => T): T;
+	release(): void;
+}
+
 export interface GraphRunStore {
+	acquireExecutionLease?(): GraphExecutionLease;
 	persist(state: GraphState, projection?: GraphRunProjection): void;
 }
 

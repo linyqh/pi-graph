@@ -100,6 +100,7 @@ export function promptNode(options: PromptNodeOptions): GraphNode {
 				signal: ctx.signal,
 				parseJson: options.validation ? true : options.parseJson,
 				...(ctx.reportUsage ? { reportUsage: ctx.reportUsage } : {}),
+				...(ctx.spawnProcess ? { spawnProcess: ctx.spawnProcess } : {}),
 				...(ctx.graph.executionVersion === 2 ? { preserveOutput: true } : {}),
 			});
 
@@ -176,6 +177,7 @@ export function subagentNode(options: SubagentNodeOptions): GraphNode {
 				signal: ctx.signal,
 				parseJson: options.validation ? true : options.parseJson,
 				...(ctx.reportUsage ? { reportUsage: ctx.reportUsage } : {}),
+				...(ctx.spawnProcess ? { spawnProcess: ctx.spawnProcess } : {}),
 				...(ctx.graph.executionVersion === 2 ? { preserveOutput: true } : {}),
 			});
 			return {
@@ -272,7 +274,9 @@ export function approvalNode(options: ApprovalNodeOptions): GraphNode {
 					summary: `Approval node ${options.id} paused because no UI is available.`,
 				};
 			}
-			const approved = await ctx.ui.confirm(renderTemplate(options.title, ctx.state), renderTemplate(options.message, ctx.state));
+			const approved = await ctx.ui.confirm(renderTemplate(options.title, ctx.state), renderTemplate(options.message, ctx.state),
+				ctx.graph.executionVersion === 2 ? { signal: ctx.signal } : undefined);
+			if (ctx.graph.executionVersion === 2 && ctx.signal?.aborted) throw ctx.signal.reason;
 			const key = options.outputKey ?? options.id;
 			const output = { approved };
 			return {
@@ -383,7 +387,7 @@ export function parallelNode(options: ParallelNodeOptions): GraphNode {
 			const effectiveConcurrency = Math.max(1, Math.min(concurrency, children.length));
 			ctx.emit(`Parallel node ${options.id} started with ${children.length} children.`);
 			const results = await mapWithConcurrency([...children], effectiveConcurrency, async (node) => {
-				if (ctx.signal?.aborted) throw new Error(`Parallel node ${options.id} aborted.`);
+				if (ctx.signal?.aborted) throw ctx.signal?.reason ?? new Error(`Parallel node ${options.id} aborted.`);
 				const childState: GraphState = {
 					...ctx.state,
 					data: { ...ctx.state.data },

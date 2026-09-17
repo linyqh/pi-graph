@@ -1,5 +1,5 @@
 import { boundedExecutionValue } from "./output-contract.ts";
-import { GraphExecutionError } from "./execution-policy.ts";
+import { GraphExecutionError, providerExecutionError } from "./execution-policy.ts";
 import { GraphControlFlowError } from "./types.ts";
 import {
 	createBashTool,
@@ -230,13 +230,13 @@ export function createGraphExecutionServices(
 						signal: request.signal,
 						cacheRetention: "none",
 					},
-				);
+				).catch((error: unknown) => { throw providerExecutionError(error); });
 				request.reportUsage?.({ tokens: (response.usage?.input ?? 0) + (response.usage?.output ?? 0) + (response.usage?.cacheRead ?? 0) + (response.usage?.cacheWrite ?? 0), cost: response.usage?.cost?.total ?? 0 });
 				if (response.stopReason === "aborted") {
 					throw abortedError(response.errorMessage || "Prompt model was aborted.");
 				}
 				if (response.stopReason === "error") {
-					throw new Error(response.errorMessage || "Prompt model stopped with an error.");
+					throw providerExecutionError(new Error(response.errorMessage || "Prompt model stopped with an error."));
 				}
 				if (response.stopReason === "length") {
 					throw truncatedError("Prompt node");
@@ -295,13 +295,15 @@ export function createGraphExecutionServices(
 					cwd: request.cwd,
 					signal: request.signal,
 					reportUsage: request.reportUsage,
+					spawnProcess: request.spawnProcess,
 				});
 
 				if (result.stopReason === "aborted") {
 					throw abortedError(result.errorMessage || result.stderr || `Subagent ${request.agentName} was aborted.`);
 				}
 				if (result.exitCode !== 0 || result.stopReason === "error") {
-					throw new Error(result.errorMessage || result.stderr || `Subagent ${request.agentName} failed.`);
+					const error = new Error(result.errorMessage || result.stderr || `Subagent ${request.agentName} failed.`);
+					throw result.errorOrigin === "model" ? providerExecutionError(error) : error;
 				}
 				if (result.stopReason === "length") {
 					throw truncatedError(`Subagent ${request.agentName}`);
