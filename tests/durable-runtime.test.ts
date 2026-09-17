@@ -337,9 +337,75 @@ test("v2 graph deadline dismisses approval without recording a decision", async 
 test("v2 configuration errors containing provider keywords are never retried", async () => {
 	const spec: any = specification();
 	spec.nodes[0].children = [{ id: "bad", type: "tool", tool: "ECONNRESET", args: {}, failure: { maxAttempts: 3, initialDelayMs: 1 } }];
-	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-tool-config", services: createGraphExecutionServices() });
+	const result = await runGraph(pi, compileDeclarativeGraphSpec(spec), { goal: "plan", cwd: "/durable-tool-config", services: { ...createGraphExecutionServices(), requiresProcessOwnership: false } });
 	assert.equal(result.status, "failed");
 	assert.match(result.state.error!, /Unsupported graph tool/);
 	assert.equal(result.state.tasks!.bad.attempts, 1);
 	assert.equal(result.state.history.filter((event) => event.type === "retry").length, 0);
+});
+
+test("v2 default services require ownership even when explicitly injected", async () => {
+	await assert.rejects(runGraph(pi, compileDeclarativeGraphSpec(specification()), { cwd: "/durable-no-store", goal: "plan", services: createGraphExecutionServices() }), /process ownership/);
+});
+
+test("v2 resume confirmation obeys the original deadline", async () => {
+	const spec: any = specification();
+	spec.mutationPolicy = "mutating";
+	spec.start = "write";
+	spec.nodes = [{ id: "write", type: "tool", tool: "write", args: { path: "x", content: "x" } }];
+	const graph = compileDeclarativeGraphSpec(spec);
+	const execution = services(async (name) => name);
+	execution.invokeTool = async () => { throw new Error("fixture failure"); };
+	const context = { isProjectTrusted: () => true } as any;
+	const first = await runGraph(pi, graph, { cwd: "/durable-resume-confirm", goal: "plan", services: execution, extensionContext: context });
+	let called = false;
+	first.state.deadlineAt = Date.now() - 1;
+	await assert.rejects(resumeGraph(pi, graph, first.state, { cwd: first.state.cwd, services: execution, runtimeServices: { confirmResume: async () => { called = true; return true; } } }), /time budget/);
+	assert.equal(called, false);
+	first.state.deadlineAt = Date.now() + 20;
+	await assert.rejects(resumeGraph(pi, graph, first.state, { cwd: first.state.cwd, services: execution, ui: {
+		confirm: async (_title: string, _message: string, options: { signal: AbortSignal }) => new Promise<boolean>((resolve) => {
+			called = true;
+			options.signal.addEventListener("abort", () => resolve(false), { once: true });
+		}),
+	} as any }), /time budget/);
+	assert.equal(called, true);
+});
+
+test("v2 recovery uses owned project results and rejects stale resume snapshots", async () => {
+	const { mkdtempSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { createProjectGraphRunStore } = await import("../extensions/graph-engine/run-store.ts");
+	const { interruptOrphanedGraphRuns } = await import("../extensions/graph-engine/runtime.ts");
+	const { default: extension } = await import("../extensions/graph-engine/index.ts");
+	const dir = mkdtempSync(join(tmpdir(), "graph-owned-recovery-"));
+	try {
+		const store = createProjectGraphRunStore(dir);
+		const graph = compileDeclarativeGraphSpec(specification());
+		const execution = services(async (name) => { if (name === "efficiency") throw new Error("failure"); return name; });
+		const first = await runGraph(pi, graph, { cwd: dir, goal: "plan", services: execution, runStore: store });
+		const newer = structuredClone(first.state);
+		newer.resumeCount++;
+		store.persist(newer);
+		await assert.rejects(resumeGraph(pi, graph, first.state, { cwd: dir, services: execution, runStore: store }), /stale/);
+		newer.status = "running";
+		store.persist(newer);
+		const stale = structuredClone(newer);
+		delete stale.tasks!.growth;
+		const entries = [{ type: "custom", customType: "graph-run", data: { state: stale } }];
+		const handlers: Array<(...args: any[]) => unknown> = [];
+		extension({ appendEntry() {}, registerEntryRenderer() {}, registerCommand() {}, registerTool() {}, events: { on() {}, emit() {} },
+			on(name: string, handler: (...args: any[]) => unknown) { if (name === "session_start") handlers.push(handler); },
+		} as any);
+		const lease = store.acquireExecutionLease();
+		try {
+			await assert.rejects(async () => { for (const handler of handlers) await handler({}, { cwd: dir, isProjectTrusted: () => true, sessionManager: { getBranch: () => entries }, hasUI: false, ui: { notify() {} } }); }, /still alive/);
+			assert.ok(store.readCheckpoint(newer.runId)!.tasks!.growth.result);
+		} finally { lease.release(); }
+		const [recovered] = interruptOrphanedGraphRuns(pi, entries, { cwd: dir, runStore: store });
+		assert.equal(recovered.status, "interrupted");
+		assert.ok(recovered.tasks!.growth.result);
+		assert.equal(recovered.resumeCount, newer.resumeCount);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
 });

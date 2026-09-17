@@ -152,11 +152,12 @@ function defaultRuntimeServices(pi: ExtensionAPI, graph: GraphDefinition | undef
 		clearStatus() {
 			ui?.setStatus("graph-engine", undefined);
 		},
-		async confirmResume(state, node) {
+		async confirmResume(state, node, signal) {
 			if (!ui) return false;
 			return ui.confirm(
 				"Resume graph node?",
 				`Resume ${node.label ?? node.id} for graph ${state.graphName}. This node may modify the workspace.`,
+				{ signal },
 			);
 		},
 	};
@@ -662,7 +663,9 @@ async function prepareResumeState(
 	if (!node || node.deleted) throw new Error(`Cannot resume graph run ${checkpoint.runId}: node ${currentNode} no longer exists.`);
 
 	if (nodeMayModify(node)) {
-		const approved = await services.confirmResume(checkpoint, node);
+		if (checkpoint.schemaVersion === 2 && runtimeNow(services) >= (checkpoint.deadlineAt ?? 0)) throw new GraphExecutionError("Graph time budget exhausted before resume confirmation.", "budget");
+		const approved = await services.confirmResume(checkpoint, node, options.signal);
+		if (options.signal?.aborted) throw options.signal.reason;
 		if (!approved) {
 			const paused = copyJson(checkpoint);
 			paused.status = "paused";
@@ -962,7 +965,7 @@ export async function runGraph(
 	options: GraphRunOptions,
 ): Promise<GraphRunResult> {
 	assertValidGraph(graph);
-	if (graph.executionVersion === 2 && !options.services && !options.runStore?.acquireExecutionLease) {
+	if (graph.executionVersion === 2 && (!options.services || options.services.requiresProcessOwnership) && !options.runStore?.acquireExecutionLease) {
 		throw new GraphControlFlowError("Durable v2 execution requires a trusted workspace run store with process ownership.");
 	}
 	const resolvedOptions: GraphRunOptions = {
@@ -977,18 +980,25 @@ export async function runGraph(
 	let state: GraphState | undefined;
 	let lease: GraphExecutionLease | undefined;
 	let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+	const controller = graph.executionVersion === 2 ? new AbortController() : undefined;
 	try {
 		if (graph.executionVersion === 2 && options.runStore?.acquireExecutionLease) {
 			lease = options.runStore.acquireExecutionLease();
 			resolvedOptions.spawnProcess = lease.spawnProcess;
 		}
+		if (options.resumeFrom && options.runStore?.readCheckpoint && graph.executionVersion === 2) {
+			const current = options.runStore.readCheckpoint(options.resumeFrom.runId);
+			if (!current || hashJson(current) !== hashJson(options.resumeFrom)) throw new GraphControlFlowError("Resume checkpoint is stale or missing from the owned project run store.");
+		}
+		if (controller) {
+			resolvedOptions.signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+			if (options.resumeFrom) budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, (options.resumeFrom.deadlineAt ?? 0) - runtimeNow(services)));
+		}
 		state = await createRunnableState(graph, resolvedOptions, services);
 		if (state.status !== "running") return resultFor(graph, state);
-		if (state.schemaVersion === 2) {
-			const controller = new AbortController();
+		if (controller) {
 			budgetControllerByState.set(state, controller);
-			resolvedOptions.signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
-			budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, state.deadlineAt! - runtimeNow(services)));
+			if (!options.resumeFrom) budgetTimer = setTimeout(() => controller.abort(new GraphExecutionError("Graph time budget exhausted.", "budget")), Math.max(0, state.deadlineAt! - runtimeNow(services)));
 		}
 		return await executeState(pi, services, graph, state, resolvedOptions);
 	} finally {
@@ -1031,7 +1041,7 @@ export function interruptOrphanedGraphRuns(
 	const interrupted: GraphState[] = [];
 
 	for (const state of findLatestGraphRuns(entries)) {
-		if (state.cwd !== options.cwd || state.status !== "running") continue;
+		if (state.cwd !== options.cwd || (state.schemaVersion !== 2 && state.status !== "running")) continue;
 		const graph = options.graphForName?.(state.graphName);
 		const services = resolveRuntimeServices(pi, graph, {
 			goal: "",
@@ -1042,7 +1052,13 @@ export function interruptOrphanedGraphRuns(
 		});
 		const lease = state.schemaVersion === 2 ? options.runStore?.acquireExecutionLease?.() : undefined;
 		try {
-			const next = copyJson(state);
+			const saved = state.schemaVersion === 2 ? options.runStore?.readCheckpoint?.(state.runId) : undefined;
+			if (state.schemaVersion === 2 && options.runStore?.readCheckpoint && !saved) throw new GraphControlFlowError("Cannot recover v2 run without its owned project checkpoint.");
+			if (saved && saved.status !== "running") {
+				persist(services, saved);
+				continue;
+			}
+			const next = copyJson(saved ?? state);
 			next.status = "interrupted";
 			if (state.schemaVersion === 2) {
 				for (const status of Object.values(next.nodes)) if (status.status === "running") status.status = "interrupted";

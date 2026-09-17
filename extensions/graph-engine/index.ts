@@ -1071,6 +1071,8 @@ export default function graphEngineeringExtension(pi: ExtensionAPI) {
 		if (trusted) {
 			try {
 				for (const state of findLatestGraphRuns(ctx.sessionManager.getBranch() as GraphCheckpointEntry[])) {
+					// v2 project checkpoints are authoritative; stale session logs must never overwrite them.
+					if (state.schemaVersion === 2) continue;
 					const graph = activeCatalog.graphs[state.graphName];
 					runStore.persist(state, graph ? projectGraphRunView(graph, state) : undefined);
 				}

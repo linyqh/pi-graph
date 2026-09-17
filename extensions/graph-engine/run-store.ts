@@ -3,6 +3,8 @@ import {
 	closeSync,
 	constants,
 	fsyncSync,
+	fstatSync,
+	readFileSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
@@ -149,6 +151,19 @@ export class ProjectGraphRunStore implements GraphRunStore {
 			}
 			throw error;
 		}
+	}
+
+	readCheckpoint(runId: string): GraphState | undefined {
+		assertRunId(runId);
+		const file = join(ensureRunsDirectoryWritable(this.cwd), `${runId}.json`);
+		let fd: number;
+		try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+		try {
+			const stat = fstatSync(fd);
+			if (!stat.isFile() || stat.size > AGENT_GRAPH_RUN_MAX_BYTES) throw new Error("Invalid stored graph checkpoint.");
+			return parseStoredRun(JSON.parse(readFileSync(fd, "utf8")), file).state;
+		} finally { closeSync(fd); }
 	}
 
 	acquireExecutionLease() {

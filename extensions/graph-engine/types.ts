@@ -362,6 +362,8 @@ export interface GraphExecutionOutput {
 }
 
 export interface GraphExecutionServices {
+	/** Default Pi services require local process ownership for durable execution. */
+	requiresProcessOwnership?: boolean;
 	validateOutput?(validator: string, output: unknown, signal?: AbortSignal): Promise<{ valid: boolean; feedback?: string; blocked?: boolean }>;
 	completePrompt(request: GraphPromptRequest): Promise<GraphExecutionOutput>;
 	runSubagent(request: GraphSubagentRequest): Promise<GraphExecutionOutput>;
@@ -393,6 +395,7 @@ export interface GraphExecutionLease {
 }
 
 export interface GraphRunStore {
+	readCheckpoint?(runId: string): GraphState | undefined;
 	acquireExecutionLease?(): GraphExecutionLease;
 	persist(state: GraphState, projection?: GraphRunProjection): void;
 }
@@ -404,7 +407,7 @@ export interface GraphRuntimeServices {
 	emitUpdate(state: GraphState, message?: string): void;
 	setStatus(state: GraphState): void;
 	clearStatus(): void;
-	confirmResume(state: GraphState, node: GraphNode): Promise<boolean>;
+	confirmResume(state: GraphState, node: GraphNode, signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface GraphRunResult {

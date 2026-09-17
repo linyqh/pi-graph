@@ -213,6 +213,7 @@ export function createGraphExecutionServices(
 	}
 
 	return {
+		requiresProcessOwnership: true,
 		async completePrompt(request) {
 			if (!context) throw new Error("Prompt node requires injectable GraphExecutionServices with an ExtensionContext.");
 			if (!request.prompt.trim()) throw new Error("Prompt node prompt was empty.");
