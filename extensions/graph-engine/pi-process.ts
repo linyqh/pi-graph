@@ -1,3 +1,4 @@
+import type { GraphUsage } from "./types.ts";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -10,6 +11,7 @@ import { getGraphHostEnvironment, graphChildProcessEnv } from "./host-bridge.ts"
 const MAX_CAPTURED_STDERR = 50 * 1024;
 
 export interface PiPromptOptions {
+	reportUsage?: (usage: Partial<GraphUsage>) => void;
 	prompt: string;
 	cwd: string;
 	systemPrompt?: string;
@@ -203,6 +205,13 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 		const prepared = getGraphHostEnvironment()?.preparePiProcess?.(args, childEnv);
 		const invocation = prepared ?? getPiInvocation(args);
 		let wasAborted = false;
+		let usageError: unknown;
+		const budgetController = new AbortController();
+		const signal = options.signal ? AbortSignal.any([options.signal, budgetController.signal]) : budgetController.signal;
+		const reportUsage = (usage: Partial<GraphUsage>) => {
+			try { options.reportUsage?.(usage); }
+			catch (error) { usageError ??= error; budgetController.abort(error); }
+		};
 
 		result.exitCode = await new Promise<number>((resolve) => {
 			const proc = spawn(invocation.command, invocation.args, {
@@ -223,7 +232,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				if (settled) return;
 				settled = true;
 				if (killTimer) clearTimeout(killTimer);
-				if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
+				if (abortHandler) signal.removeEventListener("abort", abortHandler);
 				resolve(code);
 			};
 			const processLine = (line: string) => {
@@ -242,6 +251,8 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 					result.sessionId = event.id;
 				}
 
+				if (event.type === "message_start" && event.message?.role === "assistant") reportUsage({ requests: 1 });
+
 				if (event.type === "message_end" && event.message) {
 					const message = event.message;
 					if (message.role === "assistant") {
@@ -250,6 +261,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 						result.usage.turns += 1;
 						const usage = message.usage;
 						if (usage) {
+							reportUsage({ tokens: (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0), cost: usage.cost?.total ?? 0 });
 							result.usage.input += usage.input || 0;
 							result.usage.output += usage.output || 0;
 							result.usage.cacheRead += usage.cacheRead || 0;
@@ -285,7 +297,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				finish(1);
 			});
 
-			if (options.signal) {
+			if (signal) {
 				abortHandler = () => {
 					wasAborted = true;
 					proc.kill("SIGTERM");
@@ -293,8 +305,8 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 						if (proc.exitCode === null) proc.kill("SIGKILL");
 					}, 5000);
 				};
-				if (options.signal.aborted) abortHandler();
-				else options.signal.addEventListener("abort", abortHandler, { once: true });
+				if (signal.aborted) abortHandler();
+				else signal.addEventListener("abort", abortHandler, { once: true });
 			}
 		});
 
@@ -307,6 +319,7 @@ export async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptRes
 				}
 			} catch { /* Ordinary CLI diagnostics are retained as stderr. */ }
 		}
+		if (usageError) throw usageError;
 		if (wasAborted) {
 			result.stopReason = "aborted";
 			result.errorMessage = "Graph child pi process was aborted.";

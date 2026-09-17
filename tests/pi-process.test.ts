@@ -168,3 +168,26 @@ test("truncateText enforces the 50KB and 2000-line limits", () => {
 	assert.equal(byBytes.truncated, true);
 	assert.ok(Buffer.byteLength(byBytes.text, "utf8") <= 50 * 1024);
 });
+
+test("subagent usage budget cancels the process and waits for its exit", { skip: process.platform === "win32" }, async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-graph-budget-process-"));
+	const fakePi = path.join(dir, "pi");
+	const originalPath = process.env.PATH;
+	const pidFile = path.join(dir, "pid");
+	const budgetError = new Error("budget exhausted");
+	let requests = 0;
+	try {
+		fs.writeFileSync(fakePi, `#!${process.execPath}\nimport fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nconsole.log(JSON.stringify({type: "message_start", message: {role: "assistant"}}));\nsetInterval(() => {}, 1000);\n`);
+		fs.chmodSync(fakePi, 0o755);
+		process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ""}`;
+		await assert.rejects(runPiSubagent({ agentName: "probe", prompt: "x", cwd: dir, tools: [], skills: [],
+			reportUsage(delta) { requests += delta.requests ?? 0; throw budgetError; },
+		}), (error) => error === budgetError);
+		assert.equal(requests, 1);
+		const pid = Number(fs.readFileSync(pidFile, "utf8"));
+		assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH");
+	} finally {
+		if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

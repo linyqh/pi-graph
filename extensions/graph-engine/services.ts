@@ -1,3 +1,6 @@
+import { boundedExecutionValue } from "./output-contract.ts";
+import { GraphExecutionError } from "./execution-policy.ts";
+import { GraphControlFlowError } from "./types.ts";
 import {
 	createBashTool,
 	createEditTool,
@@ -21,7 +24,7 @@ import type {
 	JsonObject,
 } from "./types.ts";
 import { parseJsonFromText, runPiSubagent } from "./pi-process.ts";
-import { resolveGraphTool } from "./host-bridge.ts";
+import { resolveGraphTool, getGraphHostEnvironment } from "./host-bridge.ts";
 import { resolveAssignedSkills, type AssignedSkill } from "./skill-selection.ts";
 import { listAvailableToolNames } from "./tool-selection.ts";
 
@@ -90,7 +93,14 @@ function truncateValue(value: unknown): unknown {
 	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, truncateValue(entry)]));
 }
 
+function parseOutput(text: string): unknown {
+	try { return parseJsonFromText(text); }
+	catch { throw new GraphExecutionError(`Model output was not valid JSON. Previous output: ${text.slice(0, 8192)}`, "output"); }
+}
+
 function normalizeError(error: unknown, kind: string): Error {
+	if (error instanceof GraphExecutionError) return new GraphExecutionError(`${kind}: ${error.message}`, error.kind, error.retryAfterMs);
+	if (error instanceof GraphControlFlowError) return error;
 	if (error instanceof Error) {
 		const normalized = new Error(`${kind}: ${error.message}`, { cause: error });
 		normalized.name = error.name;
@@ -209,6 +219,7 @@ export function createGraphExecutionServices(
 
 			const model = resolveModel(context, request.provider, request.model);
 			try {
+				request.reportUsage?.({ requests: 1 });
 				const response = await context.modelRegistry.complete(
 					model,
 					{
@@ -220,6 +231,7 @@ export function createGraphExecutionServices(
 						cacheRetention: "none",
 					},
 				);
+				request.reportUsage?.({ tokens: (response.usage?.input ?? 0) + (response.usage?.output ?? 0) + (response.usage?.cacheRead ?? 0) + (response.usage?.cacheWrite ?? 0), cost: response.usage?.cost?.total ?? 0 });
 				if (response.stopReason === "aborted") {
 					throw abortedError(response.errorMessage || "Prompt model was aborted.");
 				}
@@ -232,9 +244,9 @@ export function createGraphExecutionServices(
 				const rawText = textFromContent(response.content);
 				if (!rawText.trim()) throw new Error("Prompt node returned empty output.");
 				const truncated = truncateText(rawText);
-				const output = request.parseJson ? parseJsonFromText(rawText) : truncated.text;
+				const output = request.parseJson ? parseOutput(rawText) : request.preserveOutput ? rawText : truncated.text;
 				return {
-					output: truncateValue(output),
+					output: request.preserveOutput ? boundedExecutionValue(output) : truncateValue(output),
 					text: truncated.text,
 					meta: metadataBase("prompt", {
 						model: `${model.provider}/${model.id}`,
@@ -248,6 +260,12 @@ export function createGraphExecutionServices(
 			} catch (error) {
 				throw normalizeError(error, "Prompt node failed");
 			}
+		},
+
+		async validateOutput(validator, output, signal) {
+			const validate = getGraphHostEnvironment()?.validateOutput;
+			if (!validate) throw new GraphControlFlowError(`Output validator is not registered: ${validator}`);
+			return validate(validator, output, context, signal);
 		},
 
 		async runSubagent(request) {
@@ -276,6 +294,7 @@ export function createGraphExecutionServices(
 					skills,
 					cwd: request.cwd,
 					signal: request.signal,
+					reportUsage: request.reportUsage,
 				});
 
 				if (result.stopReason === "aborted") {
@@ -289,9 +308,9 @@ export function createGraphExecutionServices(
 				}
 				if (!result.finalText.trim()) throw new Error(`Subagent ${request.agentName} returned empty output.`);
 
-				const output = request.parseJson ? parseJsonFromText(result.finalText) : result.finalText;
+				const output = request.parseJson ? parseOutput(result.finalText) : result.finalText;
 				return {
-					output: truncateValue(output),
+					output: request.preserveOutput ? boundedExecutionValue(output) : truncateValue(output),
 					text: truncateText(result.finalText).text,
 					meta: metadataBase("subagent", {
 						agentName: request.agentName,
@@ -340,7 +359,7 @@ export function createGraphExecutionServices(
 				}
 				const text = textFromContent(result.content);
 				return {
-					output: truncateValue({
+					output: (request.preserveOutput ? boundedExecutionValue : truncateValue)({
 						tool: request.tool,
 						args: request.args,
 						content: result.content,

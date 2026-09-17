@@ -335,3 +335,54 @@ For large graphs, copy the active spec into a separate draft, edit that file, th
 `validateOnly` checks the candidate and previews the change without confirmation or graph/history writes. Remove it to submit normally. The tool reads the draft once, validates tool/Skill assignments, shows the diff, asks for approval and activates that exact in-memory candidate with the existing hash guard and immutable revisions. File edits made during the approval dialog cannot silently alter the confirmed candidate.
 
 Validation failures are marked as actual Pi tool errors. Broken-link diagnostics identify reachable nodes whose missing `next` may explain unreachable nodes. A second identical edit error stops the current turn and blocks further tool calls in that turn; the next user turn starts fresh. Correct the draft instead of repeating full inline JSON or invoking internal revision APIs through bash. `graph_list` refreshes the project catalog on every call. JSON closing braces (`}}`) are permitted as literal prompt text; malformed opening placeholders (`{{`) are still rejected.
+
+## v2 持久化执行（源码候选，尚未发布）
+
+声明式图显式使用 `schemaVersion: 2`；TypeScript 图设置 `executionVersion: 2`，并提供覆盖完整实现配置的 `definitionHash`。未声明的 TypeScript 图和 v1 JSON 保持原有执行语义；既有检查点不能升级成 v2 后恢复。
+
+首批实现固定业务图中的只读任务局部恢复、重试和输出验证。动态任务列表、FP&A 业务门禁接入及 Web 状态展示属于后续批次。
+
+```json
+{
+  "schemaVersion": 2,
+  "name": "bounded-analysis",
+  "version": "1.0.0",
+  "description": "独立分析并保存结果",
+  "mutationPolicy": "read-only",
+  "start": "analyze",
+  "budget": { "maxInvocations": 12, "maxRequests": 32, "maxTokens": 100000, "maxCost": 5, "timeoutMs": 1800000 },
+  "nodes": [{
+    "id": "analyze", "type": "parallel", "concurrency": 2,
+    "children": [{
+      "id": "evidence", "type": "prompt", "prompt": "返回 JSON：{\"finding\":\"分析结论\"}",
+      "failure": { "maxAttempts": 3, "initialDelayMs": 2000, "maxDelayMs": 30000 },
+      "budget": { "maxRequests": 8, "timeoutMs": 600000 },
+      "validation": {
+        "schema": { "type": "object", "required": ["finding"], "properties": { "finding": { "type": "string" } }, "additionalProperties": false },
+        "maxCorrections": 2
+      }
+    }]
+  }]
+}
+```
+
+### 契约与恢复
+
+- `state.tasks[nodeId]` 在同一 run 内保存输入哈希、结果与结果哈希、尝试次数、累计消耗、绝对截止时间、反馈和下一次重试时间。静态节点 ID 全图唯一；正常业务回边进入新一轮任务，恢复原轮次保留成功结果。
+- 子节点结果与 completed 状态在同一个原子运行快照提交；写入失败不能标为成功。恢复从序列化快照读取，仅重启未完成或输入改变的任务。成功兄弟任务不再次调用模型。
+- 输入哈希覆盖图定义哈希、节点 ID、cwd、goal、不可变 context、父数据和宿主默认模型 provider/id。节点显式模型、工具和 Skill 名称属于定义哈希。外部工具实现、Skill 文件内容及业务凭据的版本须由插件放入不可变 context 或定义版本；引擎不自行证明业务证据仍然有效。
+- 业务插件须在启动和恢复入口重新验证预检及封存凭据。预检过期或业务指纹变化时阻止旧运行，重新预检后创建新运行，不能更换旧 context。本批尚未连接 pi-fpa 的这一门禁。
+- 首次终止失败后停止派发新任务；已启动任务收尾并保存，各分支立即发出状态更新。取消传播到子 Pi 进程，先 SIGTERM，5 秒后仍未退出则 SIGKILL，等待进程退出。
+- v2 模型/工具返回值和下游数据保持完整，显示文本仍截断。单个执行值上限 4 MiB、运行快照沿用 16 MiB；超限明确失败，大工件由工具保存到工作区并返回引用，本批不新增自动工件存储协议。
+
+### 三种循环和预算
+
+`failure.maxAttempts` 控制一次执行/显式恢复中的基础设施重试，默认 1；只重试结构化 `GraphExecutionError(kind="transient")` 及集中适配的明确过载、限流、临时网络错误。指数退避带抖动，默认 2 秒起、60 秒封顶，并尊重有效的 `retryAfterMs`。未知错误、权限错误和业务阻塞不自动重试。修改型节点保持禁止自动重复执行。
+
+`validation` 仅用于只读 prompt/subagent；自动要求 JSON。schema 支持 type、properties、required、additionalProperties（布尔）、items、enum、const、minimum/maximum、min/maxLength、min/maxItems、description，最大嵌套 12 层；不支持远程引用或可执行校验。可选 `validator` 是宿主注册的版本化名称，经 `GraphHostEnvironment.validateOutput` 或注入服务解析。验证器必须响应 AbortSignal；返回 `blocked: true` 为业务阻塞，其余无效结果可反馈修正。未注册名称必须拒绝，不能当作通过。
+
+输出修正默认最多 2 次，可设 0；相同无效结果与诊断视为无进展。修正计数在恢复后保留。每轮修正重新调用现有 Pi 节点执行能力，子代理内部仍由 Pi 负责模型—工具循环；独立业务审核保持原有独立节点。
+
+所有调用、Pi 内循环、自动重试和输出修正共用累计预算。Graph 和叶子任务可分别配置；未指定项的默认值：256 次节点调用、1024 次可观测模型请求、1000 万 tokens、1000 USD（按 provider 报价）；Graph 1 小时、叶子任务 30 分钟。时间从首次开始计算，暂停和退避也占用，不在恢复时清零。生产业务图应显式收紧预算。
+
+请求计数基于 direct completion 和 Pi assistant-start 事件；tokens/费用按返回的 usage 累计，缺失费用无法精确计价。SDK 内不可见的 HTTP 重试不能逐次计数，并行在途请求可能产生短暂超额；超额被观测后停止继续调用并取消对应子进程。自定义执行服务必须传递 signal、报告 usage，不能把这一机制当成上游计费硬限额。

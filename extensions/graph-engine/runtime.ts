@@ -1,5 +1,10 @@
+import Value from "typebox/value";
+import { boundedExecutionValue } from "./output-contract.ts";
+import { GraphExecutionError, executionErrorKind, retryDelay, waitForRetry } from "./execution-policy.ts";
+import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
+	GraphBudget, GraphUsage,
 	GraphCheckpointEntry,
 	GraphCheckpointEnvelope,
 	GraphDefinition,
@@ -28,6 +33,22 @@ function now(): number {
 
 function createRunId(graphName: string): string {
 	return `${graphName}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+
+function hashJson(value: unknown): string {
+	const canonical = (item: unknown): unknown => {
+		if (Array.isArray(item)) return item.map(canonical);
+		if (!item || typeof item !== "object") return item;
+		return Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical((item as JsonObject)[key])]));
+	};
+	return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+
+function taskInputHash(graph: GraphDefinition, node: GraphNode, state: GraphState, options: GraphRunOptions): string {
+	const { __graphError: _failure, ...data } = state.data;
+	return hashJson({ definition: graph.definitionHash, node: node.id, cwd: state.cwd, goal: state.goal,
+		context: state.context, data, model: options.extensionContext?.model ? { provider: options.extensionContext.model.provider, id: options.extensionContext.model.id } : undefined });
 }
 
 function copyJson<T>(value: T): T {
@@ -279,6 +300,8 @@ async function executeNode(
 		pi,
 		graph,
 		state,
+		feedback: observableState.tasks?.[node.id]?.feedback,
+		reportUsage: state.schemaVersion === 2 ? (usage) => recordUsage(services, graph, node, observableState, usage) : undefined,
 		cwd: options.cwd,
 		signal: options.signal,
 		extensionContext: options.extensionContext,
@@ -305,25 +328,52 @@ async function executeNode(
 			emitUpdate(services, observableState, truncatedMessage);
 		},
 		async runChildNode(childNode, childState = copyJson(state)) {
+			if (state.schemaVersion === 2) delete childState.data.__graphError;
+			const inputHash = state.schemaVersion === 2 ? taskInputHash(graph, childNode, childState, options) : undefined;
+			const cached = observableState.tasks?.[childNode.id];
+			if (inputHash && cached?.inputHash === inputHash && cached.result !== undefined) {
+				if (hashJson(cached.result) !== cached.resultHash) throw new GraphControlFlowError(`Corrupt saved result for ${childNode.id}.`);
+				emitUpdate(services, observableState, `Reusing completed ${childNode.label ?? childNode.id}.`);
+				return copyJson(cached.result);
+			}
 			const startedAt = runtimeNow(services);
 			const startEvent = makeEvent(services, childNode.id, "start");
 			const stagedState = copyJson(observableState);
 			stagedState.nodes[childNode.id] = { status: "running", startedAt };
+			if (inputHash) {
+				stagedState.tasks ??= {};
+				stagedState.tasks[childNode.id] = cached?.inputHash === inputHash ? copyJson(cached) : { inputHash, attempts: 0 };
+			}
 			stagedState.updatedAt = startedAt;
 			stagedState.history.push(startEvent);
 			persist(services, stagedState);
+			if (inputHash) {
+				observableState.tasks ??= {};
+				observableState.tasks[childNode.id] = stagedState.tasks![childNode.id];
+			}
 			observableState.nodes[childNode.id] = { status: "running", startedAt };
 			observableState.updatedAt = startedAt;
 			observableState.history.push(startEvent);
 			childState.nodes[childNode.id] = { status: "running", startedAt };
 			emitUpdate(services, observableState, `Running ${childNode.label ?? childNode.id}...`);
 			try {
-				const result = await executeNode(pi, services, graph, childState, childNode, options, observableState);
+				const result = inputHash
+					? await executeDurableNode(pi, services, graph, childState, childNode, options, observableState)
+					: await executeNode(pi, services, graph, childState, childNode, options, observableState);
 				const completedAt = runtimeNow(services);
-				observableState.nodes[childNode.id] = { ...observableState.nodes[childNode.id], status: "completed", startedAt, completedAt };
-				observableState.updatedAt = completedAt;
-				observableState.history.push(makeEvent(services, childNode.id, "success", { message: result.summary }));
-				persist(services, observableState);
+				const completedState = copyJson(observableState);
+				completedState.nodes[childNode.id] = { ...completedState.nodes[childNode.id], status: "completed", startedAt, completedAt };
+				completedState.updatedAt = completedAt;
+				completedState.history.push(makeEvent(services, childNode.id, "success", { message: result.summary }));
+				if (inputHash) {
+					const savedResult = copyJson(result);
+					completedState.tasks![childNode.id] = { ...completedState.tasks![childNode.id], result: savedResult, resultHash: hashJson(savedResult) };
+				}
+				persist(services, completedState);
+				observableState.nodes[childNode.id] = completedState.nodes[childNode.id];
+				if (inputHash) observableState.tasks![childNode.id] = completedState.tasks![childNode.id];
+				observableState.history = completedState.history;
+				observableState.updatedAt = completedState.updatedAt;
 				emitUpdate(services, observableState, result.summary);
 				return result;
 			} catch (error) {
@@ -348,6 +398,123 @@ async function executeNode(
 			}
 		},
 	});
+}
+
+function emptyUsage(): GraphUsage { return { invocations: 0, requests: 0, tokens: 0, cost: 0 }; }
+
+function assertUsageBudget(usage: GraphUsage, budget: GraphBudget | undefined, beforeInvocation: boolean): void {
+	for (const [field, cap] of [["invocations", budget?.maxInvocations ?? 256], ["requests", budget?.maxRequests ?? 1024], ["tokens", budget?.maxTokens ?? 10000000], ["cost", budget?.maxCost ?? 1000]] as const) {
+		if (usage[field] > cap || (beforeInvocation && usage[field] >= cap)) throw new GraphExecutionError(`Execution ${field} budget exhausted.`, "budget");
+	}
+}
+
+function checkBudget(graph: GraphDefinition, node: GraphNode, state: GraphState, time: number): void {
+	assertUsageBudget(state.usage ?? emptyUsage(), graph.budget, true);
+	const task = state.tasks?.[node.id];
+	assertUsageBudget(task?.usage ?? emptyUsage(), node.budget, true);
+	if (time >= (state.deadlineAt ?? Infinity) || time >= (task?.deadlineAt ?? Infinity)) throw new GraphExecutionError("Execution time budget exhausted.", "budget");
+}
+
+function recordUsage(services: GraphRuntimeServices, graph: GraphDefinition, node: GraphNode, state: GraphState, delta: Partial<GraphUsage>): void {
+	state.usage ??= emptyUsage();
+	const task = state.tasks![node.id];
+	task.usage ??= emptyUsage();
+	for (const key of ["invocations", "requests", "tokens", "cost"] as const) {
+		const amount = delta[key] ?? 0;
+		if (!Number.isFinite(amount) || amount < 0) throw new GraphControlFlowError("Invalid model usage report.");
+		state.usage[key] += amount;
+		task.usage[key] += amount;
+	}
+	persist(services, state);
+	assertUsageBudget(state.usage, graph.budget, false);
+	assertUsageBudget(task.usage, node.budget, false);
+}
+
+async function executeDurableNode(
+	pi: ExtensionAPI, services: GraphRuntimeServices, graph: GraphDefinition,
+	state: GraphState, node: GraphNode, options: GraphRunOptions, observable: GraphState,
+): Promise<GraphNodeResult> {
+	const maxAttempts = node.failure?.maxAttempts ?? 1;
+	let transientAttempts = 0;
+	while (true) {
+		let record = observable.tasks![node.id];
+		checkBudget(graph, node, observable, runtimeNow(services));
+		if (record.nextRetryAt) {
+			const remaining = Math.min(record.nextRetryAt, observable.deadlineAt ?? Infinity, record.deadlineAt ?? Infinity) - runtimeNow(services);
+			await waitForRetry(Math.max(0, remaining), options.signal);
+			checkBudget(graph, node, observable, runtimeNow(services));
+		}
+		if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+		record = observable.tasks![node.id];
+		record.attempts++;
+		record.deadlineAt ??= runtimeNow(services) + (node.budget?.timeoutMs ?? 1800000);
+		recordUsage(services, graph, node, observable, { invocations: 1 });
+		delete record.nextRetryAt;
+		persist(services, observable);
+		try {
+			const controller = new AbortController();
+			const deadline = Math.min(observable.deadlineAt!, observable.tasks![node.id].deadlineAt!);
+			const timer = setTimeout(() => controller.abort(new GraphExecutionError("Task time budget exhausted.", "budget")), Math.max(0, deadline - runtimeNow(services)));
+			const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+			let result: GraphNodeResult;
+			try {
+				result = await executeNode(pi, services, graph, copyJson(state), node, { ...options, signal }, observable);
+				if (signal.aborted) throw signal.reason;
+				if (node.validation) {
+					let feedback: string | undefined;
+					if (!Value.Check(node.validation.schema, result.output)) {
+						feedback = [...Value.Errors(node.validation.schema, result.output)].slice(0, 8)
+							.map((error) => `${error.instancePath}: ${error.message}`).join("; ");
+					} else if (node.validation.validator) {
+						const validate = (options.services ?? createGraphExecutionServices(options.extensionContext, pi)).validateOutput;
+						if (!validate) throw new GraphControlFlowError(`Output validator is not registered: ${node.validation.validator}`);
+						const verdict = await validate(node.validation.validator, result.output, signal);
+						if (signal.aborted) throw signal.reason;
+						if (verdict.blocked) throw new GraphExecutionError(verdict.feedback ?? "Business validation blocked.", "business");
+						if (!verdict.valid) feedback = verdict.feedback ?? "Output validator rejected the result.";
+					}
+					if (feedback) {
+						record = observable.tasks![node.id];
+						const invalidOutputHash = hashJson({ output: result.output, feedback });
+						if (record.invalidOutputHash === invalidOutputHash || (record.corrections ?? 0) >= (node.validation.maxCorrections ?? 2)) {
+							record.corrections = node.validation.maxCorrections ?? 2;
+							throw new GraphExecutionError(`Output validation exhausted or made no progress: ${feedback}`, "output");
+						}
+						record.invalidOutputHash = invalidOutputHash;
+						record.feedback = JSON.stringify({ errors: feedback, previousOutput: result.output }).slice(0, 16384);
+						record.corrections = (record.corrections ?? 0) + 1;
+						observable.history.push(makeEvent(services, node.id, "checkpoint", { message: `Output correction ${record.corrections}: ${feedback}` }));
+						persist(services, observable);
+						emitUpdate(services, observable, `Correcting output for ${node.label ?? node.id}.`);
+						continue;
+					}
+				}
+				return boundedExecutionValue(result);
+			} catch (error) { throw signal.aborted ? signal.reason : error; }
+			finally { clearTimeout(timer); }
+		} catch (error) {
+			if (isAbortError(error, options.signal) || error instanceof GraphControlFlowError) throw error;
+			record = observable.tasks![node.id];
+			record.errorKind = executionErrorKind(error);
+			if (record.errorKind === "output" && node.validation) {
+				const feedback = errorMessage(options, error);
+				const invalidOutputHash = hashJson(feedback);
+				if (record.invalidOutputHash !== invalidOutputHash && (record.corrections ?? 0) < (node.validation.maxCorrections ?? 2)) {
+					record.invalidOutputHash = invalidOutputHash;
+					record.feedback = feedback.slice(0, 16384);
+					record.corrections = (record.corrections ?? 0) + 1;
+					persist(services, observable);
+					continue;
+				}
+			}
+			transientAttempts++;
+			if (record.errorKind !== "transient" || transientAttempts >= maxAttempts) throw error;
+			record.nextRetryAt = runtimeNow(services) + retryDelay(node.failure, transientAttempts, error);
+			observable.history.push(makeEvent(services, node.id, "retry", { attempt: transientAttempts, maxAttempts, error: errorMessage(options, error) }));
+			persist(services, observable);
+			emitUpdate(services, observable, `Retrying ${node.label ?? node.id} at ${new Date(record.nextRetryAt).toISOString()}.`);
+		}
+	}
 }
 
 function resetNodeTreeForResume(state: GraphState, node: GraphNode): void {
@@ -377,13 +544,14 @@ export function validateGraphRunContext(value: unknown): Readonly<Record<string,
 function createInitialState(graph: GraphDefinition, options: GraphRunOptions, services: GraphRuntimeServices): GraphState {
 	const startedAt = runtimeNow(services);
 	const executionServices = options.services ?? createGraphExecutionServices(options.extensionContext);
-	const goal = executionServices.truncate(options.goal) as string;
-	const input = executionServices.truncate(options.input ?? {}) as JsonObject;
+	const goal = graph.executionVersion === 2 ? boundedExecutionValue(options.goal) : executionServices.truncate(options.goal) as string;
+	const input = graph.executionVersion === 2 ? boundedExecutionValue(options.input ?? {}) : executionServices.truncate(options.input ?? {}) as JsonObject;
 	if (Object.hasOwn(input, "__graphError")) {
 		throw new GraphControlFlowError("Graph input cannot use reserved key: __graphError");
 	}
 	return {
-		schemaVersion: GRAPH_STATE_SCHEMA_VERSION,
+		schemaVersion: graph.executionVersion === 2 ? 2 : GRAPH_STATE_SCHEMA_VERSION,
+		...(graph.executionVersion === 2 ? { tasks: {}, usage: emptyUsage(), deadlineAt: startedAt + (graph.budget?.timeoutMs ?? 3600000) } : {}),
 		runId: services.createRunId(graph.name),
 		graphName: graph.name,
 		graphVersion: graph.version,
@@ -413,7 +581,7 @@ function latestStateFromEntry(entry: GraphCheckpointEntry): GraphState | undefin
 
 export function isLegacyGraphState(state: unknown): boolean {
 	if (!state || typeof state !== "object") return true;
-	return (state as { schemaVersion?: unknown }).schemaVersion !== GRAPH_STATE_SCHEMA_VERSION;
+	return ![GRAPH_STATE_SCHEMA_VERSION, 2].includes((state as { schemaVersion: number }).schemaVersion);
 }
 
 export function findLatestGraphRuns(entries: GraphCheckpointEntry[]): GraphState[] {
@@ -451,6 +619,9 @@ async function prepareResumeState(
 	if (!checkpoint) throw new Error("Missing resume checkpoint.");
 	if (isLegacyGraphState(checkpoint)) {
 		throw new Error(`Cannot resume legacy graph state schema: ${String(checkpoint.schemaVersion)}`);
+	}
+	if (checkpoint.schemaVersion !== (graph.executionVersion === 2 ? 2 : GRAPH_STATE_SCHEMA_VERSION)) {
+		throw new Error("Cannot resume with different graph execution semantics.");
 	}
 	if (graph.deleted) throw new Error(`Cannot resume deleted graph: ${graph.name}`);
 	if (checkpoint.graphName !== graph.name) {
@@ -506,7 +677,7 @@ async function prepareResumeState(
 	state.completedAt = undefined;
 	state.resumeCount += 1;
 	state.updatedAt = runtimeNow(services);
-	resetNodeTreeForResume(state, node);
+	if (state.schemaVersion !== 2) resetNodeTreeForResume(state, node);
 	return state;
 }
 
@@ -533,7 +704,7 @@ async function executeNodeWithPolicy(
 	options: GraphRunOptions,
 	claimStep: () => void,
 ): Promise<NodeExecutionOutcome> {
-	const maxAttempts = node.failure?.maxAttempts ?? 1;
+	const maxAttempts = state.schemaVersion === 2 ? 1 : node.failure?.maxAttempts ?? 1;
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 		if (options.signal?.aborted) throw new Error("Graph run was aborted.");
@@ -563,7 +734,13 @@ async function executeNodeWithPolicy(
 
 		try {
 			const immutableContext = state.context;
-			const result = await executeNode(pi, services, graph, state, node, options);
+			let result: GraphNodeResult;
+			if (state.schemaVersion === 2 && ["prompt", "subagent", "tool"].includes(node.type)) {
+				const inputHash = taskInputHash(graph, node, state, options);
+				state.tasks ??= {};
+				if (state.tasks[node.id]?.inputHash !== inputHash) state.tasks[node.id] = { inputHash, attempts: 0 };
+				result = await executeDurableNode(pi, services, graph, state, node, options, state);
+			} else result = await executeNode(pi, services, graph, state, node, options);
 			if (state.context !== immutableContext) throw new GraphControlFlowError("Graph nodes cannot replace immutable run context.");
 			return { kind: "success", result };
 		} catch (error) {
@@ -632,6 +809,7 @@ async function executeState(
 	if (state.status !== "running") return resultFor(graph, state);
 
 	let steps = 0;
+	let resumingCurrent = Boolean(options.resumeFrom);
 	const maxSteps = graph.maxSteps ?? 32;
 
 	try {
@@ -645,6 +823,12 @@ async function executeState(
 			if (!node || node.deleted) throw new Error(`Unknown graph node: ${state.currentNode}`);
 			assertMutationAuthorized(graph, state, node, options);
 
+			// A business loop entering the parallel group again is a new batch, not a resume.
+			if (state.schemaVersion === 2 && !resumingCurrent) {
+				delete state.tasks?.[node.id];
+				for (const child of node.children ?? []) delete state.tasks?.[child.id];
+			}
+			resumingCurrent = false;
 			const outcome = await executeNodeWithPolicy(pi, services, graph, state, node, options, () => {
 				if (steps >= maxSteps) throw new Error(`Graph exceeded maxSteps (${maxSteps}).`);
 				steps += 1;
@@ -670,8 +854,8 @@ async function executeState(
 			const executionServices = options.services ?? createGraphExecutionServices(options.extensionContext);
 			const nodeResult: GraphNodeResult = {
 				...rawNodeResult,
-				data: rawNodeResult.data ? executionServices.truncate(rawNodeResult.data) as JsonObject : undefined,
-				output: rawNodeResult.output === undefined ? undefined : executionServices.truncate(rawNodeResult.output),
+				data: rawNodeResult.data ? (state.schemaVersion === 2 ? boundedExecutionValue(rawNodeResult.data) : executionServices.truncate(rawNodeResult.data)) as JsonObject : undefined,
+				output: rawNodeResult.output === undefined ? undefined : (state.schemaVersion === 2 ? boundedExecutionValue(rawNodeResult.output) : executionServices.truncate(rawNodeResult.output)),
 				summary: rawNodeResult.summary ? executionServices.truncate(rawNodeResult.summary) as string : undefined,
 			};
 			mergeData(state.data, nodeResult.data);

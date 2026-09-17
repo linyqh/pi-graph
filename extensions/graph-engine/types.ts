@@ -57,6 +57,8 @@ export interface GraphNodeStatus {
 
 export interface GraphNodeFailurePolicy {
 	maxAttempts?: number;
+	initialDelayMs?: number;
+	maxDelayMs?: number;
 	onError?: string;
 }
 
@@ -93,7 +95,39 @@ export interface GraphApprovalRecord {
 	resumeCount: number;
 }
 
+export interface GraphBudget {
+	maxInvocations?: number;
+	maxRequests?: number;
+	maxTokens?: number;
+	maxCost?: number;
+	timeoutMs?: number;
+}
+export interface GraphUsage { invocations: number; requests: number; tokens: number; cost: number }
+
+export interface GraphOutputValidation {
+	schema: JsonObject;
+	validator?: string;
+	maxCorrections?: number;
+}
+
+export interface GraphTaskRecord {
+	inputHash: string;
+	usage?: GraphUsage;
+	deadlineAt?: number;
+	result?: GraphNodeResult;
+	resultHash?: string;
+	attempts: number;
+	nextRetryAt?: number;
+	errorKind?: string;
+	corrections?: number;
+	feedback?: string;
+	invalidOutputHash?: string;
+}
+
 export interface GraphState {
+	tasks?: Record<string, GraphTaskRecord>;
+	usage?: GraphUsage;
+	deadlineAt?: number;
 	schemaVersion: number;
 	runId: string;
 	graphName: string;
@@ -119,6 +153,8 @@ export interface GraphState {
 }
 
 export interface GraphNodeContext {
+	reportUsage?: (usage: Partial<GraphUsage>) => void;
+	feedback?: string;
 	pi: ExtensionAPI;
 	graph: GraphDefinition;
 	state: GraphState;
@@ -172,6 +208,8 @@ export interface GraphNode {
 	concurrency?: number;
 	approvalNodeId?: string;
 	failure?: GraphNodeFailurePolicy;
+	validation?: GraphOutputValidation;
+	budget?: GraphBudget;
 	capabilities?: GraphNodeCapabilities;
 	metadata?: JsonObject;
 	run(ctx: GraphNodeContext): Promise<GraphNodeResult>;
@@ -192,6 +230,8 @@ export interface GraphApprovalBinding {
 }
 
 export interface GraphDefinition {
+	executionVersion?: 1 | 2;
+	budget?: GraphBudget;
 	name: string;
 	version: string;
 	definitionHash?: string;
@@ -284,6 +324,8 @@ export interface GraphRunProjection {
 export type GraphToolName = string;
 
 export interface GraphPromptRequest {
+	preserveOutput?: boolean;
+	reportUsage?: (usage: Partial<GraphUsage>) => void;
 	prompt: string;
 	systemPrompt?: string;
 	model?: string;
@@ -301,6 +343,7 @@ export interface GraphSubagentRequest extends GraphPromptRequest {
 }
 
 export interface GraphToolRequest {
+	preserveOutput?: boolean;
 	tool: GraphToolName;
 	args: JsonObject;
 	cwd: string;
@@ -314,6 +357,7 @@ export interface GraphExecutionOutput {
 }
 
 export interface GraphExecutionServices {
+	validateOutput?(validator: string, output: unknown, signal?: AbortSignal): Promise<{ valid: boolean; feedback?: string; blocked?: boolean }>;
 	completePrompt(request: GraphPromptRequest): Promise<GraphExecutionOutput>;
 	runSubagent(request: GraphSubagentRequest): Promise<GraphExecutionOutput>;
 	invokeTool(request: GraphToolRequest): Promise<GraphExecutionOutput>;

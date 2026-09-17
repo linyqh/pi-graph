@@ -584,7 +584,7 @@ test("declarative failure policies are rejected outside top-level executable nod
 				children: [{ id: "child", type: "prompt", prompt: "x", failure: { maxAttempts: 2 } }],
 			}],
 		}),
-		/additional properties/,
+		/parallel failure policy requires schemaVersion 2/,
 	);
 });
 

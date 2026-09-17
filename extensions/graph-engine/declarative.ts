@@ -4,7 +4,7 @@ import Value from "typebox/value";
 import type { RegisteredGraphDefinition } from "./registry.ts";
 import { approvalNode, parallelNode, promptNode, routerNode, subagentNode, toolNode } from "./nodes/index.ts";
 import { isMutatingTool, MAX_SUBAGENT_TOOLS, TOOL_NAME_PATTERN } from "./tool-selection.ts";
-import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphNodeResult, GraphState, GraphToolName, JsonObject } from "./types.ts";
+import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphOutputValidation, GraphBudget, GraphNodeResult, GraphState, GraphToolName, JsonObject } from "./types.ts";
 import { assertValidGraph } from "./validation.ts";
 
 const GRAPH_NAME_PATTERN = "^[a-z][a-z0-9-]{0,63}$";
@@ -29,7 +29,15 @@ const ProviderModelSchema = {
 	provider: Type.Optional(Type.String({ minLength: 1 })),
 	model: Type.Optional(Type.String({ minLength: 1 })),
 };
+const BudgetSchema = Type.Object({
+	maxInvocations: Type.Optional(Type.Integer({ minimum: 1, maximum: 4096 })),
+	maxRequests: Type.Optional(Type.Integer({ minimum: 1, maximum: 4096 })),
+	maxTokens: Type.Optional(Type.Integer({ minimum: 1, maximum: 100000000 })),
+	maxCost: Type.Optional(Type.Number({ minimum: 0, maximum: 100000 })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400000 })),
+}, { additionalProperties: false });
 const BaseNodeSchema = {
+	budget: Type.Optional(BudgetSchema),
 	id: Type.String({ pattern: NODE_ID_PATTERN }),
 	label: Type.Optional(Type.String({ minLength: 1 })),
 	next: Type.Optional(Type.String({ pattern: NODE_ID_PATTERN })),
@@ -39,6 +47,8 @@ const ApprovalReferenceSchema = {
 };
 const FailurePolicySchema = Type.Object({
 	maxAttempts: Type.Optional(Type.Integer({ minimum: 1, maximum: 3 })),
+	initialDelayMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 60000 })),
+	maxDelayMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 300000 })),
 	onError: Type.Optional(Type.String({ pattern: NODE_ID_PATTERN })),
 }, { additionalProperties: false });
 const FailurePolicyFieldSchema = {
@@ -55,6 +65,11 @@ const TransitionLabelsSchema = Type.Object({
 	description: "Localized labels for compiler-derived graph edges. Omitted fields keep the legacy English labels.",
 });
 const PromptFieldsSchema = {
+	validation: Type.Optional(Type.Object({
+		schema: Type.Record(Type.String(), Type.Unknown()),
+		validator: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+		maxCorrections: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
+	}, { additionalProperties: false })),
 	systemPrompt: Type.Optional(StringTemplateSchema),
 	prompt: StringTemplateSchema,
 	outputKey: Type.Optional(DataKeySchema),
@@ -150,9 +165,9 @@ const RouterNodeSchema = Type.Object({
 }, { additionalProperties: false });
 
 const ParallelChildSchema = Type.Union([
-	Type.Omit(PromptNodeSchema, ["failure"], { additionalProperties: false }),
-	Type.Omit(SubagentNodeSchema, ["failure"], { additionalProperties: false }),
-	Type.Omit(ToolNodeSchema, ["failure"], { additionalProperties: false }),
+	PromptNodeSchema,
+	SubagentNodeSchema,
+	ToolNodeSchema,
 ]);
 
 const ParallelNodeSchema = Type.Object({
@@ -172,7 +187,8 @@ const DeclarativeGraphNodeSchema = Type.Union([
 ]);
 
 export const DeclarativeGraphSpecSchema = Type.Object({
-	schemaVersion: Type.Literal(1),
+	schemaVersion: Type.Union([Type.Literal(1), Type.Literal(2)]),
+	budget: Type.Optional(BudgetSchema),
 	name: Type.String({ pattern: GRAPH_NAME_PATTERN }),
 	version: Type.Optional(Type.String({ minLength: 1, default: "1.0.0" })),
 	description: Type.String({ minLength: 1 }),
@@ -197,11 +213,13 @@ export interface DeclarativeTransitionLabels {
 export type DeclarativePromptLikeNode = {
 	id: string;
 	type: "prompt" | "subagent";
+	budget?: GraphBudget;
 	label?: string;
 	systemPrompt?: DeclarativeTemplate;
 	prompt: DeclarativeTemplate;
 	outputKey?: string;
 	parseJson?: boolean;
+	validation?: GraphOutputValidation;
 	next?: string;
 	provider?: string;
 	model?: string;
@@ -219,6 +237,7 @@ export type DeclarativeSubagentNode = DeclarativePromptLikeNode & {
 export type DeclarativeToolNode = {
 	id: string;
 	type: "tool";
+	budget?: GraphBudget;
 	label?: string;
 	tool: DeclarativeToolName;
 	args: JsonObject;
@@ -252,11 +271,12 @@ export type DeclarativeRouterNode = {
 export type DeclarativeParallelNode = {
 	id: string;
 	type: "parallel";
+	budget?: GraphBudget;
 	label?: string;
 	children: Array<
-		| Omit<DeclarativePromptNode, "failure">
-		| Omit<DeclarativeSubagentNode, "failure">
-		| Omit<DeclarativeToolNode, "failure">
+		| DeclarativePromptNode
+		| DeclarativeSubagentNode
+		| DeclarativeToolNode
 	>;
 	concurrency?: number;
 	next?: string;
@@ -270,7 +290,8 @@ export type DeclarativeGraphNode =
 	| DeclarativeParallelNode;
 export interface DeclarativeGraphSpec {
 	[key: string]: unknown;
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
+	budget?: GraphBudget;
 	name: string;
 	version: string;
 	description: string;
@@ -481,6 +502,19 @@ function declarativeCanReach(spec: DeclarativeGraphSpec, from: string, target: s
 
 function validateSemantic(spec: DeclarativeGraphSpec): void {
 	const issues: string[] = [];
+	if (spec.budget && spec.schemaVersion !== 2) issues.push(issue("budget", "budget requires schemaVersion 2"));
+	for (const node of allNodes(spec)) {
+		if ("budget" in node && node.budget && spec.schemaVersion !== 2) issues.push(issue(node.id, "budget requires schemaVersion 2"));
+		if ("budget" in node && node.budget && node.type === "parallel") issues.push(issue(node.id, "set budget on graph or leaf tasks, not parallel groups"));
+		if ("validation" in node && node.validation) {
+			if (spec.schemaVersion !== 2) issues.push(issue(node.id, "output validation requires schemaVersion 2"));
+			if (nodeMutates(node)) issues.push(issue(node.id, "output repair requires read-only nodes"));
+		}
+		if ("failure" in node && node.failure && spec.schemaVersion === 1
+			&& (node.failure.initialDelayMs !== undefined || node.failure.maxDelayMs !== undefined)) {
+			issues.push(issue(node.id, "retry delays require schemaVersion 2"));
+		}
+	}
 	const graphNodeIds = new Set(spec.nodes.map((node) => node.id));
 	const globalIds = new Set<string>();
 	const approvalIds = new Set(spec.nodes.filter((node) => node.type === "approval").map((node) => node.id));
@@ -525,6 +559,11 @@ function validateSemantic(spec: DeclarativeGraphSpec): void {
 		if (node.type === "parallel") {
 			for (const [childIndex, child] of node.children.entries()) {
 				const childPath = `${nodePath}.children[${childIndex}]`;
+				if ("failure" in child && child.failure) {
+					if (spec.schemaVersion !== 2) issues.push(issue(childPath, "parallel failure policy requires schemaVersion 2"));
+					if (child.failure.onError) issues.push(issue(childPath, "parallel child cannot route onError outside its parent"));
+					validateFailurePolicy(child, childPath, graphNodeIds, issues);
+				}
 				if (globalIds.has(child.id)) issues.push(issue(`${childPath}.id`, `duplicate node id: ${child.id}`));
 				globalIds.add(child.id);
 				if (!READ_ONLY_PARALLEL_CHILD_TYPES.has(child.type)) {
@@ -646,8 +685,10 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 			prompt: compileTextTemplate(node.prompt),
 			outputKey: node.outputKey,
 			parseJson: node.parseJson,
+			validation: node.validation,
 			next: node.next,
 			failure: node.failure,
+			budget: node.budget,
 		});
 	}
 	if (node.type === "subagent") {
@@ -664,9 +705,11 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 			prompt: compileTextTemplate(node.prompt),
 			outputKey: node.outputKey,
 			parseJson: node.parseJson,
+			validation: node.validation,
 			next: node.next,
 			approvalNodeId: node.approvalNodeId,
 			failure: node.failure,
+			budget: node.budget,
 		});
 	}
 	if (node.type === "tool") {
@@ -680,6 +723,7 @@ function compileDeclarativeNode(node: DeclarativeGraphNode): GraphNode {
 			mutates: nodeMutates(node),
 			approvalNodeId: node.approvalNodeId,
 			failure: node.failure,
+			budget: node.budget,
 		});
 	}
 	if (node.type === "approval") {
@@ -826,9 +870,11 @@ export function compileDeclarativeGraphSpec(value: unknown, options?: { sourcePa
 	});
 	const graph: RegisteredGraphDefinition = {
 		name: spec.name,
+		...(spec.schemaVersion === 2 ? { executionVersion: 2 as const, definitionHash: serialization.sha256 } : {}),
 		version: spec.version,
 		description: spec.description,
 		start: spec.start,
+		...(spec.budget ? { budget: spec.budget } : {}),
 		maxSteps: spec.maxSteps,
 		mutationPolicy: spec.mutationPolicy,
 		capabilities,

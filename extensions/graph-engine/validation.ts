@@ -1,3 +1,4 @@
+import { outputSchemaIssues } from "./output-contract.ts";
 import {
 	GRAPH_RUN_PROJECTION_MAX_EDGES,
 	GRAPH_RUN_PROJECTION_MAX_NODES,
@@ -74,9 +75,10 @@ function validateFailurePolicy(
 	graphNodeIds: Set<string>,
 	issues: GraphValidationIssue[],
 	isParallelChild: boolean,
+	executionVersion = 1,
 ): void {
 	if (node.failure === undefined) return;
-	if (isParallelChild) {
+	if (isParallelChild && executionVersion !== 2) {
 		issues.push({ path: `${path}.failure`, message: "parallel child nodes must not declare failure policy" });
 		return;
 	}
@@ -87,7 +89,13 @@ function validateFailurePolicy(
 		issues.push({ path: `${path}.failure`, message: "failure policy must be an object" });
 		return;
 	}
-	const { maxAttempts, onError } = node.failure;
+	const { maxAttempts, onError, initialDelayMs, maxDelayMs } = node.failure;
+	if (isParallelChild && onError) issues.push({ path, message: "parallel children cannot declare onError" });
+	for (const [key, value, max] of [["initialDelayMs", initialDelayMs, 60000], ["maxDelayMs", maxDelayMs, 300000]] as const) {
+		if (value !== undefined && (executionVersion !== 2 || !Number.isInteger(value) || value < 1 || value > max)) {
+			issues.push({ path: `${path}.failure.${key}`, message: "invalid v2 retry delay" });
+		}
+	}
 	if (maxAttempts === undefined && onError === undefined) {
 		issues.push({ path: `${path}.failure`, message: "failure policy must declare at least maxAttempts or onError" });
 	}
@@ -120,6 +128,7 @@ function validateNode(
 	issues: GraphValidationIssue[],
 	seenProjectionNodeIds: Set<string>,
 	isParallelChild = false,
+	executionVersion = 1,
 ): void {
 	if (!isNonEmptyString(node.id)) {
 		issues.push({ path, message: "node id must be a non-empty string" });
@@ -149,7 +158,16 @@ function validateNode(
 		}
 	}
 
-	validateFailurePolicy(node, path, graphNodeIds, issues, isParallelChild);
+	validateFailurePolicy(node, path, graphNodeIds, issues, isParallelChild, executionVersion);
+	if (node.validation) {
+		if (executionVersion !== 2 || !["prompt", "subagent"].includes(node.type) || nodeMutates(node)) issues.push({ path, message: "v2 output validation requires read-only model nodes" });
+		if (!Number.isInteger(node.validation.maxCorrections ?? 2) || (node.validation.maxCorrections ?? 2) < 0 || (node.validation.maxCorrections ?? 2) > 2) issues.push({ path, message: "maxCorrections must be 0..2" });
+		for (const message of outputSchemaIssues(node.validation.schema)) issues.push({ path, message });
+	}
+	if (node.budget) {
+		if (node.type === "parallel") issues.push({ path, message: "Set budgets on the graph or leaf tasks, not a parallel group" });
+		validateBudget(node.budget, executionVersion, path, issues);
+	}
 
 	if (node.type === "router" && node.routerCandidates === undefined) {
 		issues.push({ path: `${path}.routerCandidates`, message: "router nodes must declare every candidate target" });
@@ -181,23 +199,37 @@ function validateNode(
 				issues.push({ path: childPath, message: "parallel child nodes must not mutate the workspace" });
 			}
 
-			validateNode(child, childPath, graphNodeIds, issues, seenProjectionNodeIds, true);
+			validateNode(child, childPath, graphNodeIds, issues, seenProjectionNodeIds, true, executionVersion);
 		}
+	}
+}
+
+function validateBudget(budget: import("./types.ts").GraphBudget, version: number, path: string, issues: GraphValidationIssue[]): void {
+	const limits: Record<string, number> = { maxInvocations: 4096, maxRequests: 4096, maxTokens: 100000000, maxCost: 100000, timeoutMs: 86400000 };
+	for (const [key, value] of Object.entries(budget)) {
+		if (version !== 2 || !(key in limits) || !Number.isFinite(value) || value < (key === "maxCost" ? 0 : 1) || value > limits[key] || (key !== "maxCost" && !Number.isInteger(value))) issues.push({ path, message: "invalid v2 execution budget" });
 	}
 }
 
 export function validateGraph(graph: GraphDefinition): GraphValidationResult {
 	const issues: GraphValidationIssue[] = [];
+	if (graph.budget) validateBudget(graph.budget, graph.executionVersion ?? 1, "budget", issues);
 
 	if (!isNonEmptyString(graph.name)) {
 		issues.push({ path: "name", message: "graph name must be a non-empty string" });
 	}
 
+	if (graph.executionVersion !== undefined && ![1, 2].includes(graph.executionVersion)) {
+		issues.push({ path: "executionVersion", message: "unsupported execution version" });
+	}
+	if (graph.executionVersion === 2 && !graph.definitionHash) {
+		issues.push({ path: "definitionHash", message: "v2 execution requires a definition hash" });
+	}
 	if (!isNonEmptyString(graph.version)) {
 		issues.push({ path: "version", message: "graph version must be a non-empty string" });
 	}
 
-	if ((graph.definitionHash === undefined) !== (graph.sourcePath === undefined)) {
+	if (graph.executionVersion !== 2 && (graph.definitionHash === undefined) !== (graph.sourcePath === undefined)) {
 		issues.push({ path: "definitionHash", message: "definitionHash and sourcePath must be declared together" });
 	}
 	if (graph.definitionHash !== undefined && !/^[a-f0-9]{64}$/.test(graph.definitionHash)) {
@@ -258,7 +290,7 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
 		if (node.approvalNodeId && graph.nodes[node.approvalNodeId]?.type !== "approval") {
 			issues.push({ path: `nodes.${key}.approvalNodeId`, message: "approvalNodeId must reference an approval node" });
 		}
-		validateNode(node, `nodes.${key}`, graphNodeIds, issues, seenProjectionNodeIds);
+		validateNode(node, `nodes.${key}`, graphNodeIds, issues, seenProjectionNodeIds, false, graph.executionVersion ?? 1);
 	}
 
 	for (const [index, transition] of (graph.transitions ?? []).entries()) {

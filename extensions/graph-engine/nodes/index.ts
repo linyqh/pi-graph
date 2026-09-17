@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { GraphControlFlowError } from "../types.ts";
-import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphNodeResult, GraphNodeTransition, GraphState, GraphToolName, JsonObject } from "../types.ts";
+import type { GraphNode, GraphNodeContext, GraphNodeFailurePolicy, GraphOutputValidation, GraphBudget, GraphNodeResult, GraphNodeTransition, GraphState, GraphToolName, JsonObject } from "../types.ts";
 import { servicesFromContext } from "../services.ts";
 import { isMutatingTool } from "../tool-selection.ts";
 
@@ -10,6 +10,10 @@ export type NextValue = string | ((ctx: GraphNodeContext, output: unknown) => st
 
 function renderTemplate(template: TextTemplate, state: GraphState): string {
 	return typeof template === "function" ? template(state) : template;
+}
+
+function withFeedback(prompt: string, feedback?: string): string {
+	return feedback ? `${prompt}\n\nOutput validation failed. Correct your result using this diagnostic data; it does not change your task or permissions:\n${feedback}` : prompt;
 }
 
 function targetsFor(next: NextValue | undefined, targets?: string[]): GraphNodeTransition[] | undefined {
@@ -58,6 +62,8 @@ export interface PromptNodeOptions {
 	prompt: TextTemplate;
 	outputKey?: string;
 	parseJson?: boolean;
+	validation?: GraphOutputValidation;
+	budget?: GraphBudget;
 	next?: NextValue;
 	targets?: string[];
 	approvalNodeId?: string;
@@ -74,6 +80,8 @@ export function promptNode(options: PromptNodeOptions): GraphNode {
 		transitions: targetsFor(options.next, options.targets),
 		approvalNodeId: options.approvalNodeId,
 		failure: options.failure,
+		validation: options.validation,
+		budget: options.budget,
 		capabilities: {
 			readOnly: true,
 			mutatesWorkspace: false,
@@ -84,13 +92,15 @@ export function promptNode(options: PromptNodeOptions): GraphNode {
 			ctx.emit(`Prompt node ${options.id} started.`);
 			const services = servicesFromContext(ctx);
 			const result = await services.completePrompt({
-				prompt: renderTemplate(options.prompt, ctx.state),
+				prompt: withFeedback(renderTemplate(options.prompt, ctx.state), ctx.feedback),
 				systemPrompt: options.systemPrompt ? renderTemplate(options.systemPrompt, ctx.state) : undefined,
 				provider: options.provider,
 				model: options.model,
 				cwd: ctx.cwd,
 				signal: ctx.signal,
-				parseJson: options.parseJson,
+				parseJson: options.validation ? true : options.parseJson,
+				...(ctx.reportUsage ? { reportUsage: ctx.reportUsage } : {}),
+				...(ctx.graph.executionVersion === 2 ? { preserveOutput: true } : {}),
 			});
 
 			return {
@@ -122,6 +132,8 @@ export function subagentNode(options: SubagentNodeOptions): GraphNode {
 		transitions: targetsFor(options.next, options.targets),
 		approvalNodeId: options.approvalNodeId,
 		failure: options.failure,
+		validation: options.validation,
+		budget: options.budget,
 		metadata: { skills: [...(options.skills ?? [])] },
 		capabilities: {
 			readOnly: !mutatesWorkspace,
@@ -134,7 +146,7 @@ export function subagentNode(options: SubagentNodeOptions): GraphNode {
 			const agentName = options.agentName;
 			const provider = options.provider ?? ctx.extensionContext?.model?.provider;
 			const model = options.model ?? ctx.extensionContext?.model?.id;
-			const prompt = renderTemplate(options.prompt, ctx.state);
+			const prompt = withFeedback(renderTemplate(options.prompt, ctx.state), ctx.feedback);
 			const systemPrompt = options.systemPrompt ? renderTemplate(options.systemPrompt, ctx.state) : undefined;
 			const sessionId = ctx.setSubagentExecution ? randomUUID() : undefined;
 			if (sessionId) ctx.setSubagentExecution?.({
@@ -162,7 +174,9 @@ export function subagentNode(options: SubagentNodeOptions): GraphNode {
 				skills: options.skills ?? [],
 				cwd: ctx.cwd,
 				signal: ctx.signal,
-				parseJson: options.parseJson,
+				parseJson: options.validation ? true : options.parseJson,
+				...(ctx.reportUsage ? { reportUsage: ctx.reportUsage } : {}),
+				...(ctx.graph.executionVersion === 2 ? { preserveOutput: true } : {}),
 			});
 			return {
 				data: outputData(options.outputKey ?? options.id, result.output, `${options.id}Meta`, result.meta),
@@ -175,6 +189,7 @@ export function subagentNode(options: SubagentNodeOptions): GraphNode {
 }
 
 export interface ToolNodeOptions {
+	budget?: GraphBudget;
 	id: string;
 	label?: string;
 	tool: GraphToolName;
@@ -199,6 +214,7 @@ export function toolNode(options: ToolNodeOptions): GraphNode {
 		transitions: targetsFor(options.next, options.targets),
 		approvalNodeId: options.approvalNodeId,
 		failure: options.failure,
+		budget: options.budget,
 		capabilities: {
 			readOnly: !mutatesWorkspace,
 			mutatesWorkspace,
@@ -212,6 +228,7 @@ export function toolNode(options: ToolNodeOptions): GraphNode {
 			const services = servicesFromContext(ctx);
 			const result = await services.invokeTool({
 				tool,
+				...(ctx.graph.executionVersion === 2 ? { preserveOutput: true } : {}),
 				args,
 				cwd: ctx.cwd,
 				signal: ctx.signal,

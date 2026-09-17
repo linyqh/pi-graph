@@ -16,6 +16,8 @@ const HOST_ENVIRONMENT_KEY = Symbol.for("pi-graph.host-environment");
 export type GraphToolResolver = (name: string, ctx?: ExtensionContext) => ToolDefinition | undefined;
 
 export interface GraphHostEnvironment {
+	/** Registered deterministic plugin validators; no executable code from graph inputs. */
+	validateOutput?: (validator: string, output: unknown, context?: ExtensionContext, signal?: AbortSignal) => Promise<{ valid: boolean; feedback?: string; blocked?: boolean }>;
 	/** Host-owned CLI/runtime and per-child capabilities; never mutate process.env. */
 	preparePiProcess?: (args: string[], env: NodeJS.ProcessEnv) =>
 		{ command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined;
