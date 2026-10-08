@@ -12,7 +12,7 @@ test("package manifest exposes graph extension, create-graph skill, and graph-cr
 		pi?: { extensions?: string[]; skills?: string[]; prompts?: string[] };
 	};
 
-	assert.deepEqual(manifest.files, ["README.md", "extensions", "graphs", "prompts", "skills"]);
+	assert.deepEqual(manifest.files, ["README.md", "extensions", "graphs", "prompts", "skills", "dist"]);
 	assert.deepEqual(manifest.pi?.extensions, ["./extensions/graph-engine/index.ts"]);
 	assert.ok(manifest.pi?.skills?.includes("./skills"));
 	assert.ok(manifest.pi?.prompts?.includes("./prompts"));

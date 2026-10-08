@@ -367,6 +367,31 @@ Validation failures are marked as actual Pi tool errors. Broken-link diagnostics
 }
 ```
 
+### 嵌入宿主（库用法）
+
+宿主进程（Web 服务、后台任务）可以不经 Pi 会话，把引擎当作库使用：
+
+```ts
+import { compileDeclarativeGraphSpec, runEmbeddedGraph, resumeEmbeddedGraph } from "@viccydev/pi-graph";
+
+const graph = compileDeclarativeGraphSpec(spec); // schemaVersion: 2
+const result = await runEmbeddedGraph(graph, {
+	goal: "研究 OOG104", cwd: "host://research/OOG104", input: { tasks }, context: { researchId: "12" },
+	services,  // 宿主的 GraphExecutionServices：completePrompt / invokeTool / validateOutput
+	runStore,  // 宿主的 GraphRunStore：persist(state, projection) / readCheckpoint(runId)
+	signal,
+});
+// 进程重启或任务失败后，从宿主存下的快照继续：已完成任务复用保存的结果。
+await resumeEmbeddedGraph(graph, checkpoint, { cwd, services, runStore });
+```
+
+- 入口是包根（`dist/` 编译产物，由 `prepare` 在安装时构建）。`./extensions/*` 子路径仍导出源码，供 Pi 作为扩展加载。
+- 没有 Pi 会话，因此 `services` 与 `runStore` 必填；不接受 `extensionContext`、`ui`、`checkpoints`。
+- `cwd` 在嵌入场景只是运行的作用域键：同一个 `cwd` 同时只允许一个活动运行。宿主用它区分不同的研究对象即可，不必是真实目录。
+- 引擎在每次状态迁移后调用 `runStore.persist`；v2 的恢复以 `readCheckpoint` 读到的快照为权威，传入的快照与存储中的不一致会被拒绝。
+- 嵌入宿主没有子 Pi 进程，`requiresProcessOwnership` 不设置；需要跨进程互斥时由宿主保证。
+- 对等依赖范围是 `>=0.85.0 <2`：引擎核心只依赖 `ModelRegistry`/`ExtensionContext` 的少数形状，已在 Pi 0.85 与 1.0 下通过测试。
+
 ### 契约与恢复
 
 - `state.tasks[nodeId]` 在同一 run 内保存输入哈希、结果与结果哈希、尝试次数、累计消耗、绝对截止时间、反馈和下一次重试时间。静态节点 ID 全图唯一；正常业务回边进入新一轮任务，恢复原轮次保留成功结果。
