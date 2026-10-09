@@ -16,13 +16,18 @@ import type {
 	GraphState,
 } from "./types.ts";
 
-export { compileDeclarativeGraphSpec } from "./declarative.ts";
+/**
+ * Hosts that keep a graph's source in code write it to `.agent-graph/graphs/<name>.json` themselves:
+ * parse validates exactly as graph_create does, serialize produces the canonical file contents.
+ */
+export { compileDeclarativeGraphSpec, parseDeclarativeGraphSpec, serializeDeclarativeGraphSpec } from "./declarative.ts";
 export { GraphExecutionError } from "./execution-policy.ts";
 export { parseJsonFromText } from "./pi-process.ts";
 export { GraphControlFlowError } from "./types.ts";
 export { projectGraphRunView } from "./view-projection.ts";
 
 export type { ExecutionErrorKind } from "./execution-policy.ts";
+export type { DeclarativeGraphSerialization, DeclarativeGraphSpec } from "./declarative.ts";
 export type { RegisteredGraphDefinition } from "./registry.ts";
 export type {
 	GraphBudget,
