@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { resolveSubagentExtensions, validateSkillTools } from "./capabilities.ts";
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 import type {
 	GraphExecutionOutput,
@@ -172,6 +172,29 @@ function metadataBase(kind: string, extra: JsonObject = {}): JsonObject {
 		approval: "host-compatible",
 		...extra,
 	};
+}
+
+/**
+ * Pi 1.x passes tools an `ExtensionToolContext`: the extension context plus `tools` and
+ * `executeTool()` for nested calls recorded on the calling tool's transcript entry. A graph
+ * `tool` node runs outside any transcript turn, so it offers no nested tools and reports a
+ * nested call as an error result (the contract: never reject for tool failures).
+ */
+function toolContext(context: ExtensionContext | undefined, caller: string): ExtensionToolContext {
+	// Without a session there is no context to extend; built-in tools treat a missing ctx as "no session".
+	if (!context) return undefined as unknown as ExtensionToolContext;
+	return {
+		...context,
+		tools: [],
+		async executeTool(name: string) {
+			const text = `Tool ${caller} cannot call ${name}: nested tool calls are unavailable in graph tool nodes.`;
+			return {
+				toolCall: { type: "toolCall", id: `${caller}/nested`, name, arguments: {} },
+				result: { content: [{ type: "text", text }], details: undefined, isError: true },
+				isError: true,
+			};
+		},
+	} as ExtensionToolContext;
 }
 
 export function createGraphExecutionServices(
@@ -377,7 +400,7 @@ export function createGraphExecutionServices(
 					prepared as never,
 					request.signal,
 					undefined,
-					context as ExtensionContext,
+					toolContext(context, request.tool),
 				);
 				if ((result as { isError?: boolean }).isError) {
 					const text = textFromContent(result.content);

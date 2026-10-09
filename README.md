@@ -11,7 +11,7 @@
 ## 环境与安装
 
 - Node.js `>=22.19`
-- Pi `@earendil-works/pi-coding-agent 0.85.x`
+- Pi `@earendil-works/pi-coding-agent 1.x`（开发与测试锁定 1.0.2）
 
 从 npm 安装正式版本：
 
@@ -311,7 +311,7 @@ Pi 手工冒烟流程：
 6. 修改已保存的 JSON 后，旧检查点应因哈希不匹配而拒绝恢复。
 7. 让一个只读节点失败，`graph_run` 正文应是可解析 JSON；修复外部原因后用其中的 `graph_resume` 参数恢复，`runId` 应不变且 `resumeCount` 加一。
 
-## Lazy tool discovery and child agents (Pi 0.85.x)
+## Lazy tool discovery and child agents (Pi 1.x)
 
 Call `graph_capabilities` before creating or updating a graph. It returns a paginated catalog of **all registered tools**, including inactive tools, plus assignable skills. It does not activate tools or return their parameter schemas. Follow `nextOffset` until null; filters are optional.
 
@@ -322,7 +322,7 @@ Call `graph_capabilities` before creating or updating a graph. It returns a pagi
 
 Children keep an explicit tool allowlist and skill paths. A startup check fails before a model request if an assigned tool did not load, instead of silently accepting Pi's ignored unknown names. Skills do not grant tools. Read the skill and its references when choosing task-specific tools; skills may optionally declare `graph-required-tools: [read, some_tool]` in frontmatter. These declared dependencies are validated per node during create/update/rollback and execution. No system can infer every undeclared task dependency from a skill name alone.
 
-Embedded hosts can register `GraphHostEnvironment.preparePiProcess(args, env)` through `host-bridge.ts` to choose their bundled Node/Pi runtime and supply scoped provider capabilities. Preserve the supplied arguments and environment, including explicit extension paths and `PI_GRAPH_CHILD_SELECTION`. File-backed tool extensions are discovered from Pi 0.85 `getAllTools().sourceInfo.path`. Hosts using inline factories must provide a file-backed equivalent before assigning those tools to children.
+Embedded hosts can register `GraphHostEnvironment.preparePiProcess(args, env)` through `host-bridge.ts` to choose their bundled Node/Pi runtime and supply scoped provider capabilities. Preserve the supplied arguments and environment, including explicit extension paths and `PI_GRAPH_CHILD_SELECTION`. File-backed tool extensions are discovered from Pi `getAllTools().sourceInfo.path`. Hosts using inline factories must provide a file-backed equivalent before assigning those tools to children.
 
 ## Reliable graph edits
 
@@ -390,7 +390,7 @@ await resumeEmbeddedGraph(graph, checkpoint, { cwd, services, runStore });
 - `cwd` 在嵌入场景只是运行的作用域键：同一个 `cwd` 同时只允许一个活动运行。宿主用它区分不同的研究对象即可，不必是真实目录。
 - 引擎在每次状态迁移后调用 `runStore.persist`；v2 的恢复以 `readCheckpoint` 读到的快照为权威，传入的快照与存储中的不一致会被拒绝。
 - 嵌入宿主没有子 Pi 进程，`requiresProcessOwnership` 不设置；需要跨进程互斥时由宿主保证。
-- 对等依赖范围是 `>=0.85.0 <2`：引擎核心只依赖 `ModelRegistry`/`ExtensionContext` 的少数形状，已在 Pi 0.85 与 1.0 下通过测试。
+- 对等依赖范围是 `>=1.0.2 <2`。Pi 1.x 起工具 `execute` 收到的是 `ExtensionToolContext`（多了 `tools` / `executeTool`）；`tool` 节点不在对话轮次里执行，因此不提供嵌套工具调用，嵌套调用如实返回错误结果。
 
 ### 契约与恢复
 
@@ -437,4 +437,4 @@ v2 项目检查点是恢复的权威记录：会话启动不以旧 JSONL 覆盖�
 
 投影 schema 仍为 1，新增可选 `execution`（v2 执行版本、恢复资格、累计消耗与预算）和节点 `task`（调用、修正、复用、下一次重试时间、验证反馈、失败类型、必需性）。旧记录可继续展示；v1 检查点不会被提升成 v2。
 
-Pi 集成接口核对：[Extension 文档](https://pi.dev/docs/latest/extensions)、[Package 文档](https://pi.dev/docs/latest/packages)。本地集成以 FPA 的 Pi SDK 0.85.1 为准。
+Pi 集成接口核对：[Extension 文档](https://pi.dev/docs/latest/extensions)、[Package 文档](https://pi.dev/docs/latest/packages)。本地集成以 FPA 的 Pi SDK 1.0.2 为准。

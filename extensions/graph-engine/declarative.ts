@@ -367,10 +367,34 @@ function assertJsonCompatible(value: unknown, path: string, issues: string[]): v
 
 function schemaIssues(value: unknown): string[] {
 	if (Value.Check(DeclarativeGraphSpecSchema, value)) return [];
-	return [...Value.Errors(DeclarativeGraphSpecSchema, value)].map((error) => {
+	return [...toolNameIssues(value), ...[...Value.Errors(DeclarativeGraphSpecSchema, value)].map((error) => {
 		const path = error.instancePath || "/";
 		return issue(path, error.message);
-	});
+	})];
+}
+
+/**
+ * Malformed tool names, reported by name. A bad name fails every branch of the node union, and
+ * TypeBox reports only some branches' errors — which ones varies by version — so the pattern
+ * violation itself can go unmentioned.
+ */
+function toolNameIssues(value: unknown): string[] {
+	const pattern = new RegExp(TOOL_NAME_PATTERN);
+	const bad = (name: unknown) => typeof name !== "string" || !pattern.test(name);
+	const out: string[] = [];
+	const visit = (node: unknown, path: string) => {
+		if (!isRecord(node)) return;
+		if (node.type === "tool" && bad(node.tool)) out.push(issue(`${path}/tool`, `tool name must match pattern ${TOOL_NAME_PATTERN}`));
+		if (node.type === "subagent" && Array.isArray(node.tools)) {
+			node.tools.forEach((name, i) => { if (bad(name)) out.push(issue(`${path}/tools/${i}`, `tool name must match pattern ${TOOL_NAME_PATTERN}`)); });
+		}
+		for (const key of ["children", "templates"]) {
+			const list = node[key];
+			if (Array.isArray(list)) list.forEach((child, i) => visit(child, `${path}/${key}/${i}`));
+		}
+	};
+	if (isRecord(value) && Array.isArray(value.nodes)) value.nodes.forEach((node, i) => visit(node, `/nodes/${i}`));
+	return out;
 }
 
 function assertProviderModelPair(node: DeclarativeGraphNode, path: string, issues: string[]): void {

@@ -46,7 +46,7 @@ test("real Pi child loads assigned extension, excludes sibling tools and stops m
 	const extension = join(cwd, "plugin.mjs");
 	const calls = join(cwd, "requests.jsonl");
 	await writeFile(extension, `
-import { Type, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { Type, createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
 import { appendFileSync } from "node:fs";
 export default function(pi) {
   for (const name of ["fixture_query", "fixture_extra"]) pi.registerTool({ name, label:name, description:name, parameters:Type.Object({}), async execute() { return {content:[{type:"text",text:"tool executed"}],details:{}}; } });
@@ -54,7 +54,8 @@ export default function(pi) {
     baseUrl:"http://127.0.0.1:1", apiKey:"fixture", api:"openai-completions",
     models:[{id:"mock",name:"mock",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:10000,maxTokens:1000}],
     streamSimple(model, context) {
-      const names = (context.tools ?? []).map(tool => tool.name).sort();
+      // Pi 1.x declares tools in the transcript's system messages, never in context.tools.
+      const names = getCurrentTools(context.messages).map(tool => tool.name).sort();
       appendFileSync(${JSON.stringify(calls)}, JSON.stringify(names)+"\\n");
       const result = context.messages.find(message => message.role === "toolResult");
       const useTool = names.includes("fixture_query") && !result;
